@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyc
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+ENV/
+
+# Generated output directories (pipeline creates these)
+origins/
+embedded/
+notfound/
+
+# Generated reports and logs
+pipeline.log
+metadata_batch.json
+pipeline_report.html
+metadata_report.html
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
