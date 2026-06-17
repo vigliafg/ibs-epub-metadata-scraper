@@ -24,6 +24,9 @@ metadata_report.html
 # macOS
 .DS_Store
 
+# PyInstaller
+*.spec
+
 # IDE
 .idea/
 .vscode/

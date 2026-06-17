@@ -1,0 +1,130 @@
+name: Build Executables
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.platform }} ${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux
+            arch: x64
+          - os: windows-latest
+            platform: windows
+            arch: x64
+          - os: macos-13
+            platform: macos
+            arch: x64
+          - os: macos-latest
+            platform: macos
+            arch: arm64
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build CLI executable (ibs_fast_metadata_search)
+        run: >
+          pyinstaller
+          --onefile
+          --name ibs-metadata-search
+          --clean
+          --noconfirm
+          ibs_fast_metadata_search.py
+
+      - name: Build GUI executable (gui_ibs_fast_metadata_search)
+        run: >
+          pyinstaller
+          --onefile
+          --name ibs-metadata-search-gui
+          --clean
+          --noconfirm
+          --collect-data customtkinter
+          --hidden-import tkinter
+          --hidden-import tkinter.ttk
+          gui_ibs_fast_metadata_search.py
+
+      - name: Upload CLI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ibs-metadata-search-${{ matrix.platform }}-${{ matrix.arch }}
+          path: |
+            dist/ibs-metadata-search
+            dist/ibs-metadata-search.exe
+
+      - name: Upload GUI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ibs-metadata-search-gui-${{ matrix.platform }}-${{ matrix.arch }}
+          path: |
+            dist/ibs-metadata-search-gui
+            dist/ibs-metadata-search-gui.exe
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release-assets
+          for dir in */; do
+            dir="${dir%/}"
+            # Last segment is arch (x64, arm64)
+            arch="${dir##*-}"
+            # Remove arch to get prefix-platform
+            rest="${dir%-*}"
+            # Last segment is now platform (linux, windows, macos)
+            platform="${rest##*-}"
+            # Everything before platform is the prefix
+            prefix="${rest%-*}"
+
+            find "$dir" -type f | while read -r f; do
+              if [[ "$f" == *.exe ]]; then
+                cp "$f" "release-assets/${prefix}-${platform}-${arch}.exe"
+              else
+                cp "$f" "release-assets/${prefix}-${platform}-${arch}"
+              fi
+            done
+          done
+          echo "Assets prepared:"
+          ls -la release-assets/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          generate_release_notes: true
