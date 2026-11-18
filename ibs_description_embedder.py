@@ -28,15 +28,17 @@ Basato su ibs_fast_metadata_search.py, con questi fix:
      "<Autore> - <Titolo completo>.epub". Fonte del nome, in ordine di
      affidabilità: match IBS.it (titolo/autore verificati sul sito) ->
      metadati OPF interni (dc:creator/dc:title, sottotitolo EPUB3
-     incluso) -> nome file attuale. Il match IBS usa la catena:
-     EAN/ISBN esatto (dc:identifier o filename numerico, ISBN-10
-     convertito in EAN-13) -> ricerca a parole autore+titolo ->
-     ricerca con ruoli invertiti (file "Titolo - Autore"). Il parse
-     del filename è tollerante con gli underscore ('_-_'). I nomi
-     vengono puliti da spazzatura tipo "(z-lib.org)", "[English]" e da
-     caratteri illegali; le collisioni ottengono suffisso " (2)",
-     " (3)"... L'originale non rinominato è sempre nel backup
-     (origins/). Disattivabile con --no-rename.
+     incluso) -> nome file attuale. Il match usa la catena: EAN/ISBN
+     esatto (dc:identifier o filename numerico, ISBN-10 convertito in
+     EAN-13) -> ricerca a parole autore+titolo -> ricerca con ruoli
+     invertiti (file "Titolo - Autore") -> deep scan delle prime
+     pagine (lettura non distruttiva) -> GOOGLE BOOKS (fallback per i
+     libri stranieri non a catalogo IBS; la descrizione Google viene
+     convertita in testo puro). Il parse del filename è tollerante con
+     gli underscore ('_-_'). I nomi vengono puliti da spazzatura tipo
+     "(z-lib.org)", "[English]" e da caratteri illegali; le collisioni
+     ottengono suffisso " (2)", " (3)"... L'originale non rinominato è
+     sempre nel backup (origins/). Disattivabile con --no-rename.
 
 Uso:
     python3 ibs_description_embedder.py <file.epub | directory> [...] [opzioni]
@@ -74,6 +76,11 @@ from bs4 import BeautifulSoup, NavigableString, Tag
 # Configurazione IBS.it (API Algolia pubblica del sito)
 # ---------------------------------------------------------------------------
 BASE_URL = 'https://www.ibs.it/'
+GOOGLE_BOOKS_URL = 'https://www.googleapis.com/books/v1/volumes'
+OPENLIB_URL = 'https://openlibrary.org'
+# opzionale: chiave API gratuita di Google Cloud per sollevare la quota
+# anonima (spesso esaurita: HTTP 429). Env: GOOGLE_BOOKS_API_KEY
+GOOGLE_API_KEY = os.environ.get('GOOGLE_BOOKS_API_KEY', '')
 ALGOLIA_APP_ID = 'FBVFK8AIGY'
 ALGOLIA_API_KEY = '460ca8aeaa21b30a35784e7125bfca37'
 ALGOLIA_INDEX = 'prd_IBS'
@@ -312,6 +319,137 @@ def deep_scan_match(session, epub_path, opf_path):
     return None
 
 
+# ---------------------------------------------------------------------------
+# Fallback Google Books (libri stranieri non a catalogo IBS)
+# ---------------------------------------------------------------------------
+def clean_google_description(html_desc):
+    """Converte la descrizione HTML di Google Books in TESTO PURO
+    (paragrafi separati da riga vuota): regola utente, mai HTML arricchito."""
+    if not html_desc:
+        return ''
+    import html as _html
+    t = re.sub(r'<(script|style)\b.*?</\1>', ' ', html_desc,
+               flags=re.S | re.I)
+    t = re.sub(r'<br\s*/?>|</p>|</div>|</h\d>', '\n\n', t, flags=re.I)
+    t = re.sub(r'<[^>]+>', ' ', t)
+    t = _html.unescape(t)
+    paras = [re.sub(r'\s+', ' ', p).strip()
+             for p in re.split(r'\n\s*\n', t)]
+    return '\n\n'.join(p for p in paras if p)
+
+
+def search_google_books(session, query, ean=None, author='', title='',
+                        min_score=0):
+    """Cerca su Google Books (fallback per libri non a catalogo IBS).
+    Con ean: match esatto sugli industryIdentifiers. Con min_score:
+    scarta i risultati poco pertinenti (match_score). Ritorna un dict
+    compatibile con i risultati IBS (+ 'source': 'google') o None."""
+    try:
+        params = {'q': query, 'maxResults': 10}
+        if GOOGLE_API_KEY:
+            params['key'] = GOOGLE_API_KEY
+        resp = session.get(GOOGLE_BOOKS_URL, params=params, timeout=TIMEOUT)
+        resp.raise_for_status()
+        items = resp.json().get('items', [])
+    except Exception:
+        return None
+    for item in items:
+        info = item.get('volumeInfo') or {}
+        title = (info.get('title') or '').strip()
+        if not title:
+            continue
+        if ean:
+            gids = [(i.get('identifier') or '').replace('-', '')
+                    for i in (info.get('industryIdentifiers') or [])]
+            if ean not in gids:
+                continue
+        subtitle = (info.get('subtitle') or '').strip()
+        full_title = '%s: %s' % (title, subtitle) if subtitle else title
+        r = {
+            'title': full_title,
+            'url': info.get('infoLink')
+                   or info.get('canonicalVolumeLink') or '',
+            'isbn': ean or '',
+            'author': ', '.join(info.get('authors') or []),
+            'source': 'google',
+            'description': clean_google_description(
+                info.get('description') or ''),
+        }
+        if min_score and match_score(r, author, title) < min_score:
+            continue
+        return r
+    return None
+
+
+def _ol_clean_text(t):
+    """Testo puo' da note/excerpt Open Library (possono contenere HTML)."""
+    if not t:
+        return ''
+    import html as _html
+    if isinstance(t, dict):
+        t = t.get('value') or ''
+    t = re.sub(r'<(script|style)\b.*?</\1>', ' ', t, flags=re.S | re.I)
+    t = re.sub(r'<br\s*/?>|</p>|</div>', '\n\n', t, flags=re.I)
+    t = re.sub(r'<[^>]+>', ' ', t)
+    t = _html.unescape(t)
+    paras = [re.sub(r'\s+', ' ', p).strip()
+             for p in re.split(r'\n\s*\n', t)]
+    return '\n\n'.join(p for p in paras if p)
+
+
+def search_openlibrary(session, ean=None, author='', title='', min_score=0):
+    """Fallback Open Library (API libera, nessuna chiave): prima match
+    esatto per ISBN, poi ricerca a parole. Ritorna un dict compatibile
+    con i risultati IBS (+ 'source': 'openlibrary') o None."""
+    if ean:
+        try:
+            resp = session.get(
+                '%s/api/books' % OPENLIB_URL,
+                params={'bibkeys': 'ISBN:%s' % ean, 'format': 'json',
+                        'jscmd': 'data'}, timeout=TIMEOUT)
+            resp.raise_for_status()
+            data = (resp.json() or {}).get('ISBN:%s' % ean) or {}
+            if data.get('title'):
+                return {
+                    'title': data['title'],
+                    'url': data.get('url') or '',
+                    'isbn': ean,
+                    'author': ', '.join(a.get('name', '')
+                                        for a in data.get('authors') or []),
+                    'source': 'openlibrary',
+                    'description': _ol_clean_text(
+                        data.get('excerpt') or data.get('notes') or ''),
+                }
+        except Exception:
+            pass
+    if title:
+        try:
+            q = '%s %s' % (author, title) if author else title
+            resp = session.get('%s/search.json' % OPENLIB_URL,
+                               params={'q': q, 'limit': 5}, timeout=TIMEOUT)
+            resp.raise_for_status()
+            for doc in (resp.json() or {}).get('docs', []):
+                t = (doc.get('title') or '').strip()
+                if not t:
+                    continue
+                sub = (doc.get('subtitle') or '').strip()
+                full = '%s: %s' % (t, sub) if sub else t
+                r = {
+                    'title': full,
+                    'url': '%s%s' % (OPENLIB_URL, doc.get('key', '')),
+                    'isbn': ean or '',
+                    'author': ', '.join(doc.get('author_name') or []),
+                    'source': 'openlibrary',
+                    'description': '',
+                }
+                if min_score and match_score(r, author, title) < min_score:
+                    continue
+                return r
+        except Exception:
+            pass
+    return None
+
+
 def _words(text):
     """Parole significative per il matching (senza stopwords)."""
     stop = {'di', 'de', 'del', 'della', 'delle', 'dei', 'degli', 'la', 'le',
@@ -408,7 +546,26 @@ def find_book_smart(session, epub_path, opf_path, cand_author, cand_title,
         if m:
             return m
     # 4) deep scan: prime pagine dell'EPUB (lettura non distruttiva)
-    return deep_scan_match(session, epub_path, opf_path)
+    m = deep_scan_match(session, epub_path, opf_path)
+    if m:
+        return m
+    # 5) Google Books: fallback per libri stranieri non a catalogo IBS
+    if ean:
+        m = search_google_books(session, 'isbn:%s' % ean, ean=ean)
+        if m:
+            return m
+    if cand_author and cand_title:
+        m = search_google_books(
+            session, '%s %s' % (cand_author, cand_title),
+            author=cand_author, title=cand_title, min_score=30)
+        if m:
+            return m
+    # 6) Open Library: seconda rete senza chiavi API
+    m = search_openlibrary(session, ean=ean, author=cand_author,
+                           title=cand_title, min_score=30)
+    if m:
+        return m
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -751,10 +908,15 @@ def process_epub(epub_path, session, backup_dir, force, dry_run,
             if match:
                 res['matched_url'] = match['url']
                 res['isbn'] = match['isbn']
-                res['description'] = get_description(match['url'], session)
+                res['match_source'] = match.get('source', 'ibs')
+                if match.get('source') == 'google':
+                    res['description'] = match.get('description') or ''
+                else:
+                    res['description'] = get_description(match['url'],
+                                                        session)
             else:
                 res['description'] = ''
-                res['detail'] = 'nessun match su IBS.it'
+                res['detail'] = 'nessun match (IBS.it / Google Books)'
         return res
 
     # match IBS: serve per la descrizione E per la rinomina verificata
@@ -766,7 +928,7 @@ def process_epub(epub_path, session, backup_dir, force, dry_run,
         if match and match.get('title'):
             new_author = match.get('author') or cand_author
             new_title = match['title']
-            src = 'ibs'
+            src = match.get('source', 'ibs')
         elif meta_title:
             new_author, new_title = meta_author or cand_author, meta_title
             src = 'opf'
@@ -803,10 +965,13 @@ def process_epub(epub_path, session, backup_dir, force, dry_run,
 
     if not match:
         res['status'] = 'not_found'
-        res['detail'] = 'nessun match affidabile su IBS.it'
+        res['detail'] = 'nessun match affidabile (IBS.it / Google Books)'
         return res
 
-    description = get_description(match['url'], session)
+    if match.get('source') == 'google':
+        description = match.get('description') or ''
+    else:
+        description = get_description(match['url'], session)
     if not description:
         res['status'] = 'not_found'
         res['detail'] = 'descrizione non disponibile su %s' % match['url']
@@ -814,6 +979,7 @@ def process_epub(epub_path, session, backup_dir, force, dry_run,
 
     res['matched_url'] = match['url']
     res['isbn'] = match['isbn']
+    res['match_source'] = match.get('source', 'ibs')
     res['description_chars'] = len(description)
     res['description_preview'] = description[:120]
     if tag:
