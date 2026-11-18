@@ -24,6 +24,15 @@ Basato su ibs_fast_metadata_search.py, con questi fix:
      non compressa (STORED), come richiede lo standard EPUB.
   5. Se l'EPUB ha già una descrizione non vuota, viene saltato
      (usare --force per sovrascrivere).
+  6. RINOMINA AUTOMATICA: ogni epub processato viene rinominato
+     "<Autore> - <Titolo completo>.epub". Fonte del nome, in ordine di
+     affidabilità: match IBS.it (titolo/autore verificati sul sito) ->
+     metadati OPF interni (dc:creator/dc:title, sottotitolo EPUB3
+     incluso) -> nome file attuale. I nomi vengono puliti da spazzatura
+     tipo "(z-lib.org)", "[English]" e da caratteri illegali; le
+     collisioni ottengono suffisso " (2)", " (3)"... L'originale non
+     rinominato è sempre nel backup (origins/). Disattivabile con
+     --no-rename.
 
 Uso:
     python3 ibs_description_embedder.py <file.epub | directory> [...] [opzioni]
@@ -35,6 +44,8 @@ Opzioni:
     --suggest-tags     non modifica nulla: stampa autore/titolo/descrizione
                        di ogni epub (JSON) per decidere il tag giusto
     --backup-dir DIR   cartella di backup degli originali (default: origins/)
+    --no-rename        non rinomina i file (default: rinomina in
+                       "<Autore> - <Titolo completo>.epub")
     --json             stampa i risultati anche in JSON su stdout
     --dry-run          non modifica i file, mostra solo cosa farebbe
 
@@ -369,12 +380,120 @@ def parse_filename(fn):
     return '', name
 
 
+# ---------------------------------------------------------------------------
+# Rinomina intelligente "<Autore> - <Titolo completo>.epub"
+# ---------------------------------------------------------------------------
+JUNK_PAREN = re.compile(
+    r'\(\s*(?:z-?lib[^)]*|libgen[^)]*|b-?ok[^)]*|calibre[^)]*|ebook[^)]*'
+    r'|[^)]*\.(?:org|com|net|it)[^)]*)\s*\)', re.I)
+JUNK_BRACKET = re.compile(
+    r'\[\s*(?:z-?lib[^\]]*|libgen[^\]]*|unknown|english|italian[oa]?|'
+    r'inglese|italiano|ita|eng|epub|pdf|converted?[^\]]*)\s*\]', re.I)
+MAX_NAME = 200  # lunghezza massima del basename senza estensione
+
+
+def clean_component(s):
+    """Pulisce una componente del nome file: spazzatura, caratteri
+    illegali, spazi multipli. ':' diventa '. ' (convenzione
+    "Titolo. Sottotitolo" già usata nella libreria)."""
+    s = JUNK_PAREN.sub('', s or '')
+    s = JUNK_BRACKET.sub('', s)
+    s = s.replace('/', ' ').replace('\\', ' ')
+    s = re.sub(r'[\x00-\x1f*?<>"|]', ' ', s)
+    s = re.sub(r'\s*:\s*', '. ', s)
+    s = re.sub(r'\s+', ' ', s).strip(' .,-_')
+    return s
+
+
+def build_filename(author, title):
+    """Costruisce '<Autore> - <Titolo completo>.epub' sanificato.
+    Ritorna '' se entrambe le componenti sono vuote."""
+    author = clean_component(author)
+    title = clean_component(title)
+    name = '%s - %s' % (author, title) if author and title else (author or title)
+    if not name:
+        return ''
+    if len(name) > MAX_NAME:
+        if author and len(author) + 3 < MAX_NAME - 20:
+            room = MAX_NAME - len(author) - 3
+            cut = title[:room]
+            if ' ' in cut:
+                cut = cut.rsplit(' ', 1)[0]
+            name = '%s - %s' % (author, cut)
+        else:
+            name = name[:MAX_NAME]
+            if ' ' in name:
+                name = name.rsplit(' ', 1)[0]
+    return name + '.epub'
+
+
+def rename_epub(epub_path, new_name, dry_run=False):
+    """
+    Rinomina epub_path in new_name (stessa directory), gestendo le
+    collisioni con suffissi ' (2)', ' (3)', ...
+    Ritorna (percorso_finale, cambiato).
+    """
+    directory = os.path.dirname(os.path.abspath(epub_path))
+    target = os.path.join(directory, new_name)
+    if os.path.abspath(target) == os.path.abspath(epub_path):
+        return epub_path, False
+    base, ext = os.path.splitext(new_name)
+    n = 2
+    while os.path.exists(target):
+        target = os.path.join(directory, '%s (%d)%s' % (base, n, ext))
+        n += 1
+    if not dry_run:
+        os.rename(epub_path, target)
+    return target, True
+
+
+def read_opf_metadata(epub_path, opf_path):
+    """
+    Legge autore e titolo completo dai metadati OPF dell'EPUB.
+    Ritorna (creator, title); stringhe vuote se assenti.
+    Il titolo completo include l'eventuale sottotitolo EPUB3 ('Main: Subtitle').
+    """
+    import html as _html
+    try:
+        with zipfile.ZipFile(epub_path) as z:
+            data = z.read(opf_path).decode('utf-8')
+    except Exception:
+        return '', ''
+
+    def txt(s):
+        return _html.unescape(re.sub(r'<[^>]+>', '', s)).strip()
+
+    m = re.search(r'<dc:creator[^>]*role="aut"[^>]*>(.*?)</dc:creator>',
+                  data, re.S | re.I)
+    if not m:
+        m = re.search(r'<dc:creator[^>]*>(.*?)</dc:creator>', data, re.S | re.I)
+    author = txt(m.group(1)) if m else ''
+
+    titles = []
+    for tm in re.finditer(r'<dc:title([^>]*)>(.*?)</dc:title>', data,
+                          re.S | re.I):
+        idm = re.search(r'id\s*=\s*"([^"]+)"', tm.group(1))
+        titles.append((idm.group(1) if idm else '', txt(tm.group(2))))
+    title = next((t for _i, t in titles if t), '')
+
+    # EPUB3: titolo completo = main + subtitle (via meta refines)
+    for mm in re.finditer(r'<meta([^>]*)>(.*?)</meta>', data, re.S | re.I):
+        attrs, val = mm.group(1), txt(mm.group(2))
+        if 'title-type' in attrs and val.lower() == 'subtitle':
+            rm = re.search(r'refines\s*=\s*"#([^"]+)"', attrs)
+            if rm:
+                sub = next((t for i, t in titles if i == rm.group(1)), '')
+                if sub:
+                    title = '%s: %s' % (title, sub) if title else sub
+    return author, title
+
+
 def log(msg):
     print(time.strftime('[%H:%M:%S] ') + msg, file=sys.stderr, flush=True)
 
 
 def process_epub(epub_path, session, backup_dir, force, dry_run,
-                 tag=None, suggest=False):
+                 tag=None, suggest=False, rename=True):
     """Processa un EPUB. Ritorna dict con l'esito."""
     name = os.path.basename(epub_path)
     res = {'file': name, 'status': '', 'detail': ''}
@@ -385,16 +504,20 @@ def process_epub(epub_path, session, backup_dir, force, dry_run,
         res['detail'] = 'OPF non trovato (EPUB non valido?)'
         return res
 
-    author, title = parse_filename(name)
-    res['author'] = author
-    res['title'] = title
+    # candidati autore/titolo: prima i metadati OPF, poi il nome file
+    meta_author, meta_title = read_opf_metadata(epub_path, opf_path)
+    fn_author, fn_title = parse_filename(name)
+    cand_author = meta_author or fn_author
+    cand_title = meta_title or fn_title
+    res['author'] = cand_author
+    res['title'] = cand_title
 
     if suggest:
         existing = read_existing_description(epub_path, opf_path)
         res['status'] = 'suggest'
         res['existing_description'] = existing
-        if title:
-            match = find_book(session, author, title)
+        if cand_title:
+            match = find_book(session, cand_author, cand_title)
             if match:
                 res['matched_url'] = match['url']
                 res['isbn'] = match['isbn']
@@ -404,18 +527,51 @@ def process_epub(epub_path, session, backup_dir, force, dry_run,
                 res['detail'] = 'nessun match su IBS.it'
         return res
 
+    # match IBS: serve per la descrizione E per la rinomina verificata
+    match = None
+    if cand_author and cand_title:
+        match = find_book(session, cand_author, cand_title)
+
+    # --- rinomina intelligente "<Autore> - <Titolo completo>.epub" ---
+    if rename:
+        if match and match.get('title'):
+            new_author = match.get('author') or cand_author
+            new_title = match['title']
+            src = 'ibs'
+        elif meta_title:
+            new_author, new_title = meta_author or cand_author, meta_title
+            src = 'opf'
+        else:
+            new_author, new_title = cand_author, cand_title
+            src = 'filename'
+        desired = build_filename(new_author, new_title)
+        if desired and desired != name:
+            # backup dell'originale col nome attuale, poi rinomina
+            if not dry_run:
+                os.makedirs(backup_dir, exist_ok=True)
+                backup_path = os.path.join(backup_dir, name)
+                if not os.path.exists(backup_path):
+                    shutil.copy2(epub_path, backup_path)
+            new_path, changed = rename_epub(epub_path, desired, dry_run)
+            if changed:
+                res['renamed_from'] = name
+                res['renamed_to'] = os.path.basename(new_path)
+                res['rename_source'] = src
+                epub_path = new_path
+                name = res['file'] = os.path.basename(new_path)
+
     existing = read_existing_description(epub_path, opf_path)
     if existing and not force and not tag:
         res['status'] = 'skipped'
         res['detail'] = 'descrizione già presente (%d char)' % len(existing)
         return res
 
-    if not title:
+    if not cand_title:
         res['status'] = 'error'
-        res['detail'] = 'nome file non nel formato "Autore - Titolo.epub"'
+        res['detail'] = ('titolo non determinabile: né dal nome file '
+                         'né dai metadati OPF')
         return res
 
-    match = find_book(session, author, title)
     if not match:
         res['status'] = 'not_found'
         res['detail'] = 'nessun match affidabile su IBS.it'
@@ -468,6 +624,8 @@ def main():
                     help='tag classificatore unico da embeddare (monotag)')
     ap.add_argument('--suggest-tags', action='store_true',
                     help='stampa autore/titolo/descrizione (JSON) per decidere i tag, senza modificare nulla')
+    ap.add_argument('--no-rename', action='store_true',
+                    help='disattiva la rinomina automatica in "<Autore> - <Titolo completo>.epub"')
     ap.add_argument('--backup-dir', default='origins',
                     help='cartella di backup degli originali (default: origins/)')
     ap.add_argument('--json', action='store_true',
@@ -498,11 +656,15 @@ def main():
     for i, ep in enumerate(epubs, 1):
         log('[%d/%d] %s' % (i, len(epubs), os.path.basename(ep)[:70]))
         r = process_epub(ep, session, args.backup_dir, args.force,
-                         args.dry_run, tag=args.tag, suggest=args.suggest_tags)
+                         args.dry_run, tag=args.tag, suggest=args.suggest_tags,
+                         rename=not args.no_rename)
         icon = {'embedded': '[OK]', 'skipped': '[SKIP]',
                 'not_found': '[MISS]', 'error': '[FAIL]',
                 'dry_run': '[DRY]', 'suggest': '[SUGG]'}.get(r['status'], '[?]')
         log('   %s %s | %s' % (icon, r['status'].upper(), r['detail']))
+        if r.get('renamed_to'):
+            log('   [RENAME] %s -> %s (fonte: %s)' % (
+                r['renamed_from'], r['renamed_to'], r.get('rename_source', '?')))
         results.append(r)
 
     if args.suggest_tags:
