@@ -79,6 +79,10 @@ BASE_URL = 'https://www.ibs.it/'
 GOOGLE_BOOKS_URL = 'https://www.googleapis.com/books/v1/volumes'
 OPENLIB_URL = 'https://openlibrary.org'
 AMAZON_URL = 'https://www.amazon.it'
+# ordine di prova per il fallback Amazon: prima il marketplace italiano,
+# poi quelli anglofoni (catalogo inglese molto più ricco)
+AMAZON_MARKETPLACES = ('https://www.amazon.it', 'https://www.amazon.com',
+                       'https://www.amazon.co.uk')
 # opzionale: chiave API gratuita di Google Cloud per sollevare la quota
 # anonima (spesso esaurita: HTTP 429). Env: GOOGLE_BOOKS_API_KEY
 GOOGLE_API_KEY = os.environ.get('GOOGLE_BOOKS_API_KEY', '')
@@ -466,21 +470,22 @@ def _amazon_captcha(html_text):
 
 
 def search_amazon(session, query, ean=None, author='', title='',
-                  min_score=0, max_products=3):
-    """Ultima rete: Amazon.it (scraping, nessuna API pubblica).
-    Ricerca -> primi ASIN organici -> pagina prodotto (titolo, autore,
-    descrizione dal div bookDescription). Si interrompe al primo CAPTCHA.
-    Ritorna un dict compatibile (+ 'source': 'amazon') o None."""
+                  min_score=0, max_products=3, base_url=AMAZON_URL):
+    """Ultima rete: scraping di un marketplace Amazon (nessuna API
+    pubblica). Ricerca -> primi ASIN organici -> pagina prodotto
+    (titolo, autore, descrizione dal div bookDescription). Al CAPTCHA
+    passa al marketplace successivo. Ritorna un dict compatibile
+    (+ 'source': 'amazon.<dominio>') o None."""
     import html as _html
     try:
-        resp = session.get('%s/s' % AMAZON_URL, params={'k': ean or query},
+        resp = session.get('%s/s' % base_url, params={'k': ean or query},
                            timeout=TIMEOUT)
         resp.raise_for_status()
         sh = resp.text
     except Exception:
         return None
     if _amazon_captcha(sh):
-        log('Amazon: CAPTCHA sulla ricerca, fallback disattivato')
+        log('Amazon %s: CAPTCHA sulla ricerca' % base_url)
         return None
     asins = []
     for m in re.finditer(r'data-asin="([0-9B][0-9A-Z]{9})"', sh):
@@ -496,10 +501,10 @@ def search_amazon(session, query, ean=None, author='', title='',
         except Exception:
             continue
         if _amazon_captcha(ph):
-            log('Amazon: CAPTCHA sulla pagina prodotto, fallback disattivato')
+            log('Amazon %s: CAPTCHA sulla pagina prodotto' % base_url)
             return None
         m = re.search(r'<span id="productTitle"[^>]*>\s*([^<]+?)\s*<', ph)
-        atitle = m.group(1).strip() if m else ''
+        atitle = _html.unescape(m.group(1)).strip() if m else ''
         if not atitle:
             continue
         # autore dalla byline: "di <Nome> (Autore)"
@@ -511,8 +516,8 @@ def search_amazon(session, query, ean=None, author='', title='',
             blines = [l.strip() for l in btxt.splitlines() if l.strip()]
             for j, l in enumerate(blines):
                 if l.lower() == 'di' and j + 1 < len(blines):
-                    aauthor = re.sub(r'\s*\([^)]*\)\s*$', '',
-                                     blines[j + 1]).strip()
+                    aauthor = _html.unescape(re.sub(
+                        r'\s*\([^)]*\)\s*$', '', blines[j + 1])).strip()
                     break
         # descrizione dal div bookDescription (testo puro, paragrafi);
         # la descrizione sta DENTRO l'expander: niente taglio su
@@ -537,15 +542,27 @@ def search_amazon(session, query, ean=None, author='', title='',
             adesc = '\n\n'.join(out[:10])
         r = {
             'title': atitle,
-            'url': '%s/dp/%s' % (AMAZON_URL, asin),
+            'url': '%s/dp/%s' % (base_url, asin),
             'isbn': ean or '',
             'author': aauthor,
-            'source': 'amazon',
+            'source': base_url.split('//')[1].replace('www.', ''),
             'description': adesc,
         }
         if min_score and match_score(r, author, title) < min_score:
             continue
         return r
+    return None
+
+
+def search_amazon_multi(session, query, ean=None, author='', title='',
+                        min_score=0):
+    """Prova i marketplace Amazon in ordine: .it (libri italiani), poi
+    .com e .co.uk (catalogo inglese). Ritorna il primo match valido."""
+    for base in AMAZON_MARKETPLACES:
+        m = search_amazon(session, query, ean=ean, author=author,
+                          title=title, min_score=min_score, base_url=base)
+        if m:
+            return m
     return None
 
 
@@ -664,10 +681,10 @@ def find_book_smart(session, epub_path, opf_path, cand_author, cand_title,
                            title=cand_title, min_score=30)
     if m:
         return m
-    # 7) Amazon.it: ultima rete (scraping, uso contenuto)
-    m = search_amazon(session, '%s %s' % (cand_author, cand_title),
-                      ean=ean, author=cand_author, title=cand_title,
-                      min_score=30)
+    # 7) Amazon: ultima rete (scraping, uso contenuto); .it -> .com -> .co.uk
+    m = search_amazon_multi(session, '%s %s' % (cand_author, cand_title),
+                            ean=ean, author=cand_author, title=cand_title,
+                            min_score=30)
     if m:
         return m
     return None
