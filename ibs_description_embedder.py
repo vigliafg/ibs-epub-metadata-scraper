@@ -995,6 +995,74 @@ def log(msg):
     print(time.strftime('[%H:%M:%S] ') + msg, file=sys.stderr, flush=True)
 
 
+# ---------------------------------------------------------------------------
+# Last-look: covalida dell'intero job (lettura non distruttiva)
+# ---------------------------------------------------------------------------
+HTMLISH = re.compile(
+    r'</?(?:p|br|div|span|em|strong|i|b|u|ul|ol|li|h[1-6]|a)\b', re.I)
+
+
+def covalidate_file(path, tag=None, backup_path=None):
+    """Rilegge un EPUB processato e verifica:
+    1) integrità ZIP + 'mimetype' prima entry STORED;
+    2) dc:description presente e in TESTO PURO (mai HTML);
+    3) sistema monotag: un solo dc:subject, uguale al tag richiesto;
+    4) filename conforme ad 'Autore - Titolo.epub';
+    5) dc:title/dc:creator IDENTICI al backup originale.
+    Ritorna la lista dei problemi (vuota = tutto ok)."""
+    import html as _html
+    issues = []
+    try:
+        z = zipfile.ZipFile(path)
+        infos = z.infolist()
+        if not infos or infos[0].filename != 'mimetype' or \
+                infos[0].compress_type != zipfile.ZIP_STORED:
+            issues.append("'mimetype' non è la prima entry STORED")
+        opf_path = read_opf_path(path)
+        if not opf_path:
+            issues.append('OPF non leggibile')
+            return issues
+        data = z.read(opf_path).decode('utf-8')
+    except Exception as e:
+        return ['EPUB non leggibile: %s' % e]
+
+    m = re.search(r'<dc:description[^>]*>(.*?)</dc:description>', data, re.S)
+    desc = _html.unescape(m.group(1)) if m else ''
+    if not desc.strip():
+        issues.append('dc:description assente o vuota')
+    elif HTMLISH.search(desc):
+        issues.append('la descrizione contiene markup HTML')
+
+    subs = [_html.unescape(s).strip()
+            for s in re.findall(r'<dc:subject[^>]*>(.*?)</dc:subject>',
+                                data, re.S)]
+    if tag:
+        if len(subs) != 1 or subs[0] != tag:
+            issues.append('dc:subject atteso "%s", trovati %d %s'
+                          % (tag, len(subs), subs))
+    elif len(subs) > 1:
+        issues.append('più di un dc:subject (%d): violazione del monotag'
+                      % len(subs))
+
+    a, t = parse_filename(path)
+    if not (a and t):
+        issues.append('filename non conforme ad "Autore - Titolo.epub"')
+
+    if backup_path:
+        try:
+            with zipfile.ZipFile(backup_path) as bz:
+                bopf = read_opf_path(backup_path)
+                bdata = bz.read(bopf).decode('utf-8')
+            for label, pat in (
+                    ('titolo', r'<dc:title[^>]*>(.*?)</dc:title>'),
+                    ('creator', r'<dc:creator[^>]*>(.*?)</dc:creator>')):
+                if re.findall(pat, data, re.S) != re.findall(pat, bdata, re.S):
+                    issues.append('%s modificato rispetto al backup' % label)
+        except Exception as e:
+            issues.append('backup non confrontabile: %s' % e)
+    return issues
+
+
 def process_epub(epub_path, session, backup_dir, force, dry_run,
                  tag=None, suggest=False, rename=True):
     """Processa un EPUB. Ritorna dict con l'esito."""
@@ -1019,6 +1087,7 @@ def process_epub(epub_path, session, backup_dir, force, dry_run,
     cand_title = meta_title or fn_title
     res['author'] = cand_author
     res['title'] = cand_title
+    res['path'] = epub_path
 
     if suggest:
         existing = read_existing_description(epub_path, opf_path)
@@ -1065,6 +1134,7 @@ def process_epub(epub_path, session, backup_dir, force, dry_run,
                 backup_path = os.path.join(backup_dir, name)
                 if not os.path.exists(backup_path):
                     shutil.copy2(epub_path, backup_path)
+                res['backed_up'] = True
             new_path, changed = rename_epub(epub_path, desired, dry_run)
             if changed:
                 res['renamed_from'] = name
@@ -1072,6 +1142,7 @@ def process_epub(epub_path, session, backup_dir, force, dry_run,
                 res['rename_source'] = src
                 epub_path = new_path
                 name = res['file'] = os.path.basename(new_path)
+                res['path'] = epub_path
 
     existing = read_existing_description(epub_path, opf_path)
     if existing and not force and not tag:
@@ -1116,6 +1187,7 @@ def process_epub(epub_path, session, backup_dir, force, dry_run,
     backup_path = os.path.join(backup_dir, name)
     if not os.path.exists(backup_path):
         shutil.copy2(epub_path, backup_path)
+        res['backed_up'] = True
 
     ok, err = rewrite_epub(epub_path, opf_path, description, tag)
     if not ok:
@@ -1192,14 +1264,44 @@ def main():
     for r in results:
         stats[r['status']] = stats.get(r['status'], 0) + 1
 
+    # --- last-look: covalida dell'intero job ---
+    coval = None
+    if not args.dry_run:
+        log('')
+        log("--- Last-look: covalida dell'intero job ---")
+        coval = {'ok': 0, 'failed': 0, 'issues': {}}
+        for r in results:
+            if r['status'] not in ('embedded', 'skipped', 'not_found'):
+                continue
+            backup_name = r.get('renamed_from',
+                                os.path.basename(r['path'])) \
+                if r.get('backed_up') else None
+            issues = covalidate_file(
+                r['path'], tag=args.tag,
+                backup_path=(os.path.join(args.backup_dir, backup_name)
+                             if backup_name else None))
+            if issues:
+                coval['failed'] += 1
+                coval['issues'][r['file']] = issues
+                log('   [FAIL] %s' % r['file'])
+                for iss in issues:
+                    log('          - %s' % iss)
+            else:
+                coval['ok'] += 1
+                log('   [OK]   %s' % r['file'])
+        log('Covalida: %d OK, %d con problemi su %d verificati' % (
+            coval['ok'], coval['failed'], coval['ok'] + coval['failed']))
+
     log('')
     log('Completato in %.1fs — %s' % (
         time.time() - t0,
         ', '.join('%s=%d' % kv for kv in sorted(stats.items()))))
 
     if args.json:
-        print(json.dumps({'results': results, 'stats': stats},
-                         ensure_ascii=False, indent=2))
+        out = {'results': results, 'stats': stats}
+        if coval is not None:
+            out['covalidation'] = coval
+        print(json.dumps(out, ensure_ascii=False, indent=2))
 
 
 if __name__ == '__main__':
