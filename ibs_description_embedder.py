@@ -7,6 +7,11 @@ IBS EPUB Description Embedder
 Inserisce la descrizione ufficiale di IBS.it nei metadati (dc:description)
 di file EPUB, in TESTO PURO (niente HTML arricchito).
 
+Supporta anche l'embedding del TAG classificatore (--tag): sistema
+MONOTAG, un solo tag per libro, scritto come <dc:subject> nell'OPF
+(l'elemento che calibre legge all'import per popolare i tag del DB).
+I dc:subject pre-esistenti vengono sostituiti dal tag unico.
+
 Basato su ibs_fast_metadata_search.py, con questi fix:
   1. Non tocca title/creator/publisher: modifica SOLO dc:description
      (niente più titoli/autori sovrascritti in minuscolo).
@@ -25,6 +30,10 @@ Uso:
 
 Opzioni:
     --force            sovrascrive anche le descrizioni esistenti
+    --tag TAG          embed del tag classificatore (monotag, <dc:subject>);
+                       sostituisce gli eventuali dc:subject esistenti
+    --suggest-tags     non modifica nulla: stampa autore/titolo/descrizione
+                       di ogni epub (JSON) per decidere il tag giusto
     --backup-dir DIR   cartella di backup degli originali (default: origins/)
     --json             stampa i risultati anche in JSON su stdout
     --dry-run          non modifica i file, mostra solo cosa farebbe
@@ -292,11 +301,13 @@ def read_existing_description(epub_path, opf_path):
     return ''
 
 
-def rewrite_epub(epub_path, opf_path, new_description):
+def rewrite_epub(epub_path, opf_path, new_description, new_tag=None):
     """
     Riscrive l'EPUB sostituendo/inserendo dc:description (testo puro,
-    XML-escaped). Preserva ordine delle entry e 'mimetype' come prima
-    entry non compressa.
+    XML-escaped) e, se new_tag è fornito, il tag classificatore unico
+    come <dc:subject> (rimuove gli eventuali dc:subject pre-esistenti:
+    sistema monotag). Preserva ordine delle entry e 'mimetype' come
+    prima entry non compressa.
     """
     from xml.sax.saxutils import escape
 
@@ -318,6 +329,18 @@ def rewrite_epub(epub_path, opf_path, new_description):
             data, count=1)
         if n != 1:
             return False, 'tag </metadata> non trovato nell\'OPF'
+
+    if new_tag:
+        # sistema monotag: rimuove TUTTI i dc:subject esistenti
+        new_data = re.sub(r'<dc:subject[^>]*>.*?</dc:subject>\s*', '',
+                          new_data, flags=re.S)
+        new_data = re.sub(r'<dc:subject[^>]*/>\s*', '', new_data)
+        subj = '<dc:subject>%s</dc:subject>' % escape(new_tag)
+        new_data, n = re.subn(r'(</metadata\s*>)',
+                              lambda m: subj + m.group(1),
+                              new_data, count=1)
+        if n != 1:
+            return False, 'tag </metadata> non trovato nell\'OPF (subject)'
 
     tmp = epub_path + '.tmp'
     with zipfile.ZipFile(tmp, 'w') as zout:
@@ -347,10 +370,11 @@ def parse_filename(fn):
 
 
 def log(msg):
-    print(time.strftime('[%H:%M:%S] ') + msg, flush=True)
+    print(time.strftime('[%H:%M:%S] ') + msg, file=sys.stderr, flush=True)
 
 
-def process_epub(epub_path, session, backup_dir, force, dry_run):
+def process_epub(epub_path, session, backup_dir, force, dry_run,
+                 tag=None, suggest=False):
     """Processa un EPUB. Ritorna dict con l'esito."""
     name = os.path.basename(epub_path)
     res = {'file': name, 'status': '', 'detail': ''}
@@ -361,13 +385,31 @@ def process_epub(epub_path, session, backup_dir, force, dry_run):
         res['detail'] = 'OPF non trovato (EPUB non valido?)'
         return res
 
+    author, title = parse_filename(name)
+    res['author'] = author
+    res['title'] = title
+
+    if suggest:
+        existing = read_existing_description(epub_path, opf_path)
+        res['status'] = 'suggest'
+        res['existing_description'] = existing
+        if title:
+            match = find_book(session, author, title)
+            if match:
+                res['matched_url'] = match['url']
+                res['isbn'] = match['isbn']
+                res['description'] = get_description(match['url'], session)
+            else:
+                res['description'] = ''
+                res['detail'] = 'nessun match su IBS.it'
+        return res
+
     existing = read_existing_description(epub_path, opf_path)
-    if existing and not force:
+    if existing and not force and not tag:
         res['status'] = 'skipped'
         res['detail'] = 'descrizione già presente (%d char)' % len(existing)
         return res
 
-    author, title = parse_filename(name)
     if not title:
         res['status'] = 'error'
         res['detail'] = 'nome file non nel formato "Autore - Titolo.epub"'
@@ -389,6 +431,8 @@ def process_epub(epub_path, session, backup_dir, force, dry_run):
     res['isbn'] = match['isbn']
     res['description_chars'] = len(description)
     res['description_preview'] = description[:120]
+    if tag:
+        res['tag'] = tag
 
     if dry_run:
         res['status'] = 'dry_run'
@@ -400,15 +444,16 @@ def process_epub(epub_path, session, backup_dir, force, dry_run):
     if not os.path.exists(backup_path):
         shutil.copy2(epub_path, backup_path)
 
-    ok, err = rewrite_epub(epub_path, opf_path, description)
+    ok, err = rewrite_epub(epub_path, opf_path, description, tag)
     if not ok:
         res['status'] = 'error'
         res['detail'] = err
         return res
 
     res['status'] = 'embedded'
-    res['detail'] = '%d char, %d paragrafi' % (
-        len(description), len(description.split('\n\n')))
+    res['detail'] = '%d char, %d paragrafi%s' % (
+        len(description), len(description.split('\n\n')),
+        (', tag="%s"' % tag) if tag else '')
     return res
 
 
@@ -419,6 +464,10 @@ def main():
                     help='file .epub o directory contenente file .epub')
     ap.add_argument('--force', action='store_true',
                     help='sovrascrive le descrizioni esistenti')
+    ap.add_argument('--tag', metavar='TAG', default=None,
+                    help='tag classificatore unico da embeddare (monotag)')
+    ap.add_argument('--suggest-tags', action='store_true',
+                    help='stampa autore/titolo/descrizione (JSON) per decidere i tag, senza modificare nulla')
     ap.add_argument('--backup-dir', default='origins',
                     help='cartella di backup degli originali (default: origins/)')
     ap.add_argument('--json', action='store_true',
@@ -448,12 +497,17 @@ def main():
     results = []
     for i, ep in enumerate(epubs, 1):
         log('[%d/%d] %s' % (i, len(epubs), os.path.basename(ep)[:70]))
-        r = process_epub(ep, session, args.backup_dir, args.force, args.dry_run)
+        r = process_epub(ep, session, args.backup_dir, args.force,
+                         args.dry_run, tag=args.tag, suggest=args.suggest_tags)
         icon = {'embedded': '[OK]', 'skipped': '[SKIP]',
                 'not_found': '[MISS]', 'error': '[FAIL]',
-                'dry_run': '[DRY]'}.get(r['status'], '[?]')
+                'dry_run': '[DRY]', 'suggest': '[SUGG]'}.get(r['status'], '[?]')
         log('   %s %s | %s' % (icon, r['status'].upper(), r['detail']))
         results.append(r)
+
+    if args.suggest_tags:
+        print(json.dumps(results, ensure_ascii=False, indent=2))
+        return
 
     stats = {}
     for r in results:
