@@ -28,11 +28,15 @@ Basato su ibs_fast_metadata_search.py, con questi fix:
      "<Autore> - <Titolo completo>.epub". Fonte del nome, in ordine di
      affidabilità: match IBS.it (titolo/autore verificati sul sito) ->
      metadati OPF interni (dc:creator/dc:title, sottotitolo EPUB3
-     incluso) -> nome file attuale. I nomi vengono puliti da spazzatura
-     tipo "(z-lib.org)", "[English]" e da caratteri illegali; le
-     collisioni ottengono suffisso " (2)", " (3)"... L'originale non
-     rinominato è sempre nel backup (origins/). Disattivabile con
-     --no-rename.
+     incluso) -> nome file attuale. Il match IBS usa la catena:
+     EAN/ISBN esatto (dc:identifier o filename numerico, ISBN-10
+     convertito in EAN-13) -> ricerca a parole autore+titolo ->
+     ricerca con ruoli invertiti (file "Titolo - Autore"). Il parse
+     del filename è tollerante con gli underscore ('_-_'). I nomi
+     vengono puliti da spazzatura tipo "(z-lib.org)", "[English]" e da
+     caratteri illegali; le collisioni ottengono suffisso " (2)",
+     " (3)"... L'originale non rinominato è sempre nel backup
+     (origins/). Disattivabile con --no-rename.
 
 Uso:
     python3 ibs_description_embedder.py <file.epub | directory> [...] [opzioni]
@@ -92,42 +96,98 @@ SKIP_SECTION = re.compile(
 # ---------------------------------------------------------------------------
 # Ricerca su IBS.it via API Algolia
 # ---------------------------------------------------------------------------
-def search_ibs(query, session):
-    """Cerca libri su IBS.it tramite l'API Algolia. Ritorna lista di dict."""
+def _hit_to_result(hit):
+    """Converte un hit Algolia nel dict risultato interno, o None."""
+    ean = str(hit.get('ean') or '')
+    title = (hit.get('title') or '').strip()
+    product_url = hit.get('productUrl') or ''
+    if not ean or not title or not product_url:
+        return None
+    return {
+        'title': title,
+        'url': urljoin(BASE_URL, product_url),
+        'isbn': ean,
+        'author': ', '.join(hit.get('authors') or []),
+    }
+
+
+def _algolia_query(session, query, hits_per_page=15):
+    """Esegue una query sull'API Algolia di IBS. Ritorna la lista di hit."""
     headers = {
         'X-Algolia-API-Key': ALGOLIA_API_KEY,
         'X-Algolia-Application-Id': ALGOLIA_APP_ID,
         'Content-Type': 'application/json',
         'Referer': BASE_URL,
     }
-    payload = {'params': 'query=%s&hitsPerPage=15' % quote(query)}
+    payload = {'params': 'query=%s&hitsPerPage=%d'
+               % (quote(query), hits_per_page)}
     try:
         resp = session.post(ALGOLIA_URL, headers=headers, json=payload,
                             timeout=TIMEOUT)
         resp.raise_for_status()
-        data = resp.json()
+        return resp.json().get('hits', [])
     except Exception:
         return []
 
+
+def search_ibs(query, session):
+    """Cerca libri su IBS.it tramite l'API Algolia. Ritorna lista di dict."""
     results, seen = [], set()
-    for hit in data.get('hits', []):
-        ean = str(hit.get('ean') or '')
-        title = (hit.get('title') or '').strip()
-        product_url = hit.get('productUrl') or ''
-        if not ean or not title or not product_url:
+    for hit in _algolia_query(session, query):
+        r = _hit_to_result(hit)
+        if not r or r['url'] in seen:
             continue
-        full_url = urljoin(BASE_URL, product_url)
-        if full_url in seen:
-            continue
-        seen.add(full_url)
-        authors = hit.get('authors') or []
-        results.append({
-            'title': title,
-            'url': full_url,
-            'isbn': ean,
-            'author': ', '.join(authors),
-        })
+        seen.add(r['url'])
+        results.append(r)
     return results
+
+
+def find_book_by_ean(session, ean):
+    """Cerca su IBS per EAN/ISBN: match esatto sul campo 'ean' dell'indice.
+    Ritorna il dict risultato o None."""
+    for hit in _algolia_query(session, ean, hits_per_page=5):
+        if str(hit.get('ean') or '') == ean:
+            r = _hit_to_result(hit)
+            if r:
+                return r
+    return None
+
+
+def isbn10_to_ean(isbn10):
+    """Converte un ISBN-10 in EAN-13 (prefisso 978, check digit ricalcolato)."""
+    core = '978' + isbn10[:9]
+    if not core.isdigit():
+        return ''
+    total = sum((1 if i % 2 == 0 else 3) * int(d) for i, d in enumerate(core))
+    return core + str((10 - total % 10) % 10)
+
+
+def extract_ean(epub_path, opf_path):
+    """Estrae un EAN/ISBN dai dc:identifier dell'OPF ('' se assente).
+    Preferisce gli EAN-13; gli ISBN-10 vengono convertiti in EAN-13."""
+    import html as _html
+    try:
+        with zipfile.ZipFile(epub_path) as z:
+            data = z.read(opf_path).decode('utf-8')
+    except Exception:
+        return ''
+    idents = []
+    for m in re.finditer(r'<dc:identifier[^>]*>(.*?)</dc:identifier>',
+                         data, re.S | re.I):
+        v = _html.unescape(re.sub(r'<[^>]+>', '', m.group(1))).strip()
+        v = re.sub(r'(?i)^urn:isbn:', '', v)
+        v = v.replace('-', '').replace(' ', '').upper()
+        if re.fullmatch(r'\d{9}[\dX]|\d{13}', v):
+            idents.append(v)
+    for v in idents:
+        if len(v) == 13 and v.isdigit():
+            return v
+    for v in idents:
+        if len(v) == 10:
+            ean = isbn10_to_ean(v)
+            if ean:
+                return ean
+    return ''
 
 
 def _words(text):
@@ -197,6 +257,34 @@ def find_book(session, author, title):
     if best is None or best_score <= 20:
         return None
     return best
+
+
+def find_book_smart(session, epub_path, opf_path, cand_author, cand_title,
+                    name):
+    """Catena di match IBS in ordine di affidabilità:
+    1) EAN/ISBN esatto (dc:identifier dell'OPF, o filename numerico
+       tipo ISBN; ISBN-10 convertito in EAN-13);
+    2) ricerca a parole autore+titolo;
+    3) ricerca con ruoli invertiti (file "Titolo - Autore").
+    Ritorna il dict risultato o None."""
+    ean = extract_ean(epub_path, opf_path)
+    if not ean:
+        stem = os.path.splitext(os.path.basename(name))[0]
+        if re.fullmatch(r'\d{9}[\dXx]|\d{13}', stem):
+            raw = stem.upper()
+            ean = raw if len(raw) == 13 else isbn10_to_ean(raw)
+    if ean:
+        m = find_book_by_ean(session, ean)
+        if m:
+            return m
+    if cand_author and cand_title:
+        m = find_book(session, cand_author, cand_title)
+        if m:
+            return m
+        m = find_book(session, cand_title, cand_author)
+        if m:
+            return m
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -380,6 +468,18 @@ def parse_filename(fn):
     return '', name
 
 
+def parse_filename_loose(fn):
+    """Parse tollerante: normalizza '_' in spazi (e spazi multipli) prima
+    di separare autore e titolo. Rete di sicurezza per i nomi tipo
+    'All_the_Queens_Men_-_Sophie_Shorland.epub'."""
+    name = os.path.splitext(os.path.basename(fn))[0]
+    name = re.sub(r'\s+', ' ', name.replace('_', ' ')).strip()
+    parts = name.split(' - ')
+    if len(parts) >= 2:
+        return parts[0].strip(), parts[-1].strip()
+    return '', name
+
+
 # ---------------------------------------------------------------------------
 # Rinomina intelligente "<Autore> - <Titolo completo>.epub"
 # ---------------------------------------------------------------------------
@@ -505,8 +605,13 @@ def process_epub(epub_path, session, backup_dir, force, dry_run,
         return res
 
     # candidati autore/titolo: prima i metadati OPF, poi il nome file
+    # (strict, poi loose con '_' normalizzati in spazi)
     meta_author, meta_title = read_opf_metadata(epub_path, opf_path)
     fn_author, fn_title = parse_filename(name)
+    if not (fn_author and fn_title):
+        la, lt = parse_filename_loose(name)
+        fn_author = fn_author or la
+        fn_title = fn_title or lt
     cand_author = meta_author or fn_author
     cand_title = meta_title or fn_title
     res['author'] = cand_author
@@ -517,7 +622,8 @@ def process_epub(epub_path, session, backup_dir, force, dry_run,
         res['status'] = 'suggest'
         res['existing_description'] = existing
         if cand_title:
-            match = find_book(session, cand_author, cand_title)
+            match = find_book_smart(session, epub_path, opf_path,
+                                    cand_author, cand_title, name)
             if match:
                 res['matched_url'] = match['url']
                 res['isbn'] = match['isbn']
@@ -528,9 +634,8 @@ def process_epub(epub_path, session, backup_dir, force, dry_run,
         return res
 
     # match IBS: serve per la descrizione E per la rinomina verificata
-    match = None
-    if cand_author and cand_title:
-        match = find_book(session, cand_author, cand_title)
+    match = find_book_smart(session, epub_path, opf_path,
+                            cand_author, cand_title, name)
 
     # --- rinomina intelligente "<Autore> - <Titolo completo>.epub" ---
     if rename:
