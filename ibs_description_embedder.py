@@ -23,7 +23,7 @@ Basato su ibs_fast_metadata_search.py, con questi fix:
   4. Riscrittura ZIP conforme: "mimetype" resta la prima entry,
      non compressa (STORED), come richiede lo standard EPUB.
   5. Criterio "già in regola": il MONOTAG. Se l'EPUB ha esattamente un
-     dc:subject coincidente con uno dei 31 tag ufficiali, viene saltato
+     dc:subject coincidente con uno dei 29 tag ufficiali, viene saltato
      (anche senza descrizione, es. not_found). Senza monotag ma con
      descrizione pre-esistente viene comunque saltato (usare --force
      per sovrascrivere, --tag per classificarlo).
@@ -119,7 +119,7 @@ SKIP_SECTION = re.compile(
 # ---------------------------------------------------------------------------
 # Criterio "file già in regola": il MONOTAG.
 # La presenza di ESATTAMENTE un dc:subject coincidente (case-insensitive)
-# con uno dei 31 tag ufficiali (TAGGING_RULES.md) è il contrassegno di
+# con uno dei 29 tag ufficiali (TAGGING_RULES.md) è il contrassegno di
 # file processato: nessun'altra fonte scrive questi tag, quindi è un
 # fingerprint affidabile che viaggia col file. Un file taggato ma senza
 # descrizione (es. not_found su IBS) è comunque "in regola".
@@ -168,7 +168,7 @@ def read_subjects(data):
 
 def monotag_ok(subjects):
     """True se c'è esattamente un subject e coincide (case-insensitive)
-    con uno dei 31 tag ufficiali del sistema di classificazione."""
+    con uno dei 29 tag ufficiali del sistema di classificazione."""
     return (len(subjects) == 1
             and _norm_tag(subjects[0]) in _VALID_TAGS_NORM)
 

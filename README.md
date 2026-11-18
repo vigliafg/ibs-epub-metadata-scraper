@@ -51,7 +51,7 @@ Log su **stderr**, risultati completi in **JSON su stdout** (con `--json`).
 # 1) Ispezione: cosa contiene il libro? (nessuna modifica)
 python3 ibs_description_embedder.py ~/Scaricati/*.epub --suggest-tags
 
-# 2) Si sceglie UN tag dal sistema di classificazione (31 tag, vedi
+# 2) Si sceglie UN tag dal sistema di classificazione (29 tag, vedi
 #    TAGGING_RULES.md) e si esegue: descrizione + tag + rinomina in un colpo
 python3 ibs_description_embedder.py ~/Scaricati/*.epub --tag "Fisica Astrofisica Astronomia"
 ```
@@ -62,11 +62,11 @@ Il tag viene scelto dall'operatore (o dall'assistente AI) secondo `TAGGING_RULES
 
 ## ✅ Criterio "già in regola": il monotag
 
-Un file è considerato **già processato** se ha **esattamente un `dc:subject` coincidente con uno dei 31 tag ufficiali** (14 macro-categorie + 15 "Scuola *", elencati in `TAGGING_RULES.md` e hardcoded come `VALID_TAGS` nello script; confronto case-insensitive).
+Un file è considerato **già processato** se ha **esattamente un `dc:subject` coincidente con uno dei 29 tag ufficiali** (14 macro-categorie + 15 "Scuola *", elencati in `TAGGING_RULES.md` e hardcoded come `VALID_TAGS` nello script; confronto case-insensitive).
 
 Perché questo criterio:
 
-- I 31 tag sono **vocabolario proprietario** della libreria: nessun publisher o z-lib li scrive → fingerprint affidabile del nostro pipeline;
+- I 29 tag sono **vocabolario proprietario** della libreria: nessun publisher o z-lib li scrive → fingerprint affidabile del nostro pipeline;
 - **viaggia col file** (rename, spostamenti, copie non lo perdono);
 - un file **taggato ma senza descrizione** (es. descrizione non disponibile su IBS) è comunque in regola → nessun ri-tentativo sprecato alle passate successive.
 

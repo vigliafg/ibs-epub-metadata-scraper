@@ -10,7 +10,7 @@
 
 ---
 
-## 1. Struttura del sistema: 31 tag, 2 livelli
+## 1. Struttura del sistema: 29 tag, 2 livelli
 
 ### 1a. 14 macro-categorie (per tutta la libreria)
 
@@ -70,7 +70,7 @@ Scuola Storia
 6. **MONOTAG: un solo tag per libro, sempre.** Se il libro sembra
    appartenere a due categorie, si sceglie quella dominante — quella a cui
    si penserebbe per primo cercandolo. Mai tag multipli, mai tag nuovi
-   (il sistema è chiuso a 31).
+   (il sistema è chiuso a 29).
 
 ---
 

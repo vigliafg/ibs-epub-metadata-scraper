@@ -1,5 +1,5 @@
 {
-  "_description": "Sistema di classificazione della libreria Calibre: 31 tag in 2 livelli (14 macro-categorie + 15 tag 'Scuola'). Sistema MONOTAG: un solo tag per libro. Regole complete di attribuzione in TAGGING_RULES.md. Fonte di verità per il criterio 'già in regola' di ibs_description_embedder.py (VALID_TAGS).",
+  "_description": "Sistema di classificazione della libreria Calibre: 29 tag in 2 livelli (14 macro-categorie + 15 tag 'Scuola'). Sistema MONOTAG: un solo tag per libro. Regole complete di attribuzione in TAGGING_RULES.md. Fonte di verità per il criterio 'già in regola' di ibs_description_embedder.py (VALID_TAGS).",
   "_note_scuola": "I tag 'Scuola *' sono riservati a libri di testo, manuali scolastici, antologie per lo studio e dispense. Un saggio divulgativo NON è 'Scuola *' anche se tratta la stessa materia.",
   "_tag_legacy": ["Guida", "calibre"],
   "macro_categorie": [
@@ -77,7 +77,7 @@
     { "tag": "Scuola Matematica" },
     { "tag": "Scuola Storia" }
   ],
-  "tutti_i_31_tag": [
+  "tutti_i_tag": [
     "Filosofia Mitologia Religione",
     "Storia e Biografie",
     "Letteratura Romanzi e Racconti",
