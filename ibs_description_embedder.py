@@ -190,6 +190,128 @@ def extract_ean(epub_path, opf_path):
     return ''
 
 
+# ---------------------------------------------------------------------------
+# Deep scan: lettura NON distruttiva delle prime pagine dell'EPUB
+# ---------------------------------------------------------------------------
+def read_first_pages_text(epub_path, opf_path, max_docs=6, max_chars=8000):
+    """
+    Legge (SOLO lettura, nessuna modifica) le prime pagine del documento
+    seguendo lo spine dell'OPF: title page + pagina di copyright.
+    Ritorna la lista dei testi, uno per documento ('' se non disponibile)."""
+    import html as _html
+    try:
+        with zipfile.ZipFile(epub_path) as z:
+            data = z.read(opf_path).decode('utf-8')
+            items = {}
+            for m in re.finditer(r'<item\b[^>]*>', data):
+                tag = m.group(0)
+                idm = re.search(r'id="([^"]+)"', tag)
+                hm = re.search(r'href="([^"]+)"', tag)
+                mt = re.search(r'media-type="([^"]+)"', tag)
+                if idm and hm:
+                    items[idm.group(1)] = (hm.group(1),
+                                           mt.group(1) if mt else '')
+            spine = re.findall(r'<itemref[^>]*idref="([^"]+)"', data)
+            base = posixpath.dirname(opf_path)
+            chunks = []
+            total = 0
+            for idref in spine:
+                if total >= max_chars or len(chunks) >= max_docs:
+                    break
+                doc = items.get(idref)
+                if not doc:
+                    continue
+                href, mtype = doc
+                if mtype and 'html' not in mtype:
+                    continue
+                if not re.search(r'\.(x?html|htm)$', href, re.I) and not mtype:
+                    continue
+                path = posixpath.normpath(
+                    posixpath.join(base, href)) if base else href
+                try:
+                    raw = z.read(path).decode('utf-8', 'replace')
+                except Exception:
+                    continue
+                raw = re.sub(r'<(script|style)\b.*?</\1>', ' ', raw,
+                             flags=re.S | re.I)
+                txt = _html.unescape(re.sub(r'<[^>]+>', '\n', raw))
+                lines = [l.strip() for l in txt.splitlines() if l.strip()]
+                if lines:
+                    chunks.append('\n'.join(lines))
+                    total += len(chunks[-1])
+            return chunks
+    except Exception:
+        return []
+
+
+def extract_isbns_from_text(text):
+    """Estrae gli ISBN dal testo delle prime pagine (con etichetta 'ISBN'
+    o EAN-13 nudi 978/979). Ritorna lista deduplicata, in ordine."""
+    found = []
+    for m in re.finditer(
+            r'ISBN(?:[-:\s]*(?:13|10))?\s*[:\-]?\s*'
+            r'([0-9][0-9\- ]{8,28}[0-9Xx])', text, re.I):
+        v = m.group(1).replace('-', '').replace(' ', '').upper()
+        if re.fullmatch(r'\d{9}[\dX]|\d{13}', v) and v not in found:
+            found.append(v)
+    for m in re.finditer(r'\b(97[89]\d{10})\b', text):
+        if m.group(1) not in found:
+            found.append(m.group(1))
+    return found
+
+
+def title_candidates_from_text(text, max_cands=3):
+    """Candidati titolo dalle prime righe delle prime pagine (per la
+    ricerca a parole su IBS quando non c'e' nessun ISBN). Solo righe
+    con almeno 2 parole e 8 caratteri: le righe frammentate o di
+    impaginazione producono falsi positivi."""
+    cands = []
+    for line in text.splitlines():
+        l = line.strip()
+        if not (8 <= len(l) <= 120):
+            continue
+        if re.search(r'isbn|www|http|https?|©|copyright|all rights|'
+                     r'edizione|traduzione|stampa|volume\s+\d', l, re.I):
+            continue
+        if re.search(r'^page\s+\d+\s+(?:of|/)\s+\d+', l, re.I) or \
+                re.fullmatch(r'[\d\s.,;:\-–—]+', l):
+            continue
+        if len(re.findall(r'[A-Za-zàèéìòùÀÈÉÌÒÙ]{2,}', l)) < 2:
+            continue
+        if l not in cands:
+            cands.append(l)
+        if len(cands) >= max_cands:
+            break
+    return cands
+
+
+def deep_scan_match(session, epub_path, opf_path):
+    """
+    Ultima rete per file senza metadati né filename significativo:
+    lettura NON distruttiva delle prime pagine (title page, copyright),
+    estrazione di ISBN/autore/titolo e match su IBS.
+    Ritorna il dict risultato o None."""
+    pages = read_first_pages_text(epub_path, opf_path)
+    if not pages:
+        return None
+    # 1) ISBN trovati nelle prime pagine -> match esatto per EAN
+    text_all = '\n'.join(pages)
+    for isbn in extract_isbns_from_text(text_all):
+        ean = isbn if len(isbn) == 13 else isbn10_to_ean(isbn)
+        if ean:
+            m = find_book_by_ean(session, ean)
+            if m:
+                return m
+    # 2) nessun ISBN utile -> SOLO le righe della prima pagina (title
+    #    page) come titolo, con soglia severa (45) contro i falsi
+    #    positivi: il corpo del testo produce solo frammenti inaffidabili
+    for cand in title_candidates_from_text(pages[0]):
+        m = find_book(session, '', cand, min_score=45)
+        if m:
+            return m
+    return None
+
+
 def _words(text):
     """Parole significative per il matching (senza stopwords)."""
     stop = {'di', 'de', 'del', 'della', 'delle', 'dei', 'degli', 'la', 'le',
@@ -240,8 +362,9 @@ def match_score(result, author, title):
     return score
 
 
-def find_book(session, author, title):
-    """Cerca il libro su IBS.it. Ritorna (url, isbn) del miglior match o None."""
+def find_book(session, author, title, min_score=20):
+    """Cerca il libro su IBS.it. Ritorna (url, isbn) del miglior match
+    sopra min_score, o None."""
     query = '%s %s' % (author.replace(',', ' ').strip(), title)
     results = search_ibs(query, session)
     if not results:
@@ -254,7 +377,7 @@ def find_book(session, author, title):
         s = match_score(r, author, title)
         if s > best_score:
             best, best_score = r, s
-    if best is None or best_score <= 20:
+    if best is None or best_score < min_score:
         return None
     return best
 
@@ -284,7 +407,8 @@ def find_book_smart(session, epub_path, opf_path, cand_author, cand_title,
         m = find_book(session, cand_title, cand_author)
         if m:
             return m
-    return None
+    # 4) deep scan: prime pagine dell'EPUB (lettura non distruttiva)
+    return deep_scan_match(session, epub_path, opf_path)
 
 
 # ---------------------------------------------------------------------------
