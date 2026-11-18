@@ -1,0 +1,111 @@
+{
+  "_description": "Sistema di classificazione della libreria Calibre: 31 tag in 2 livelli (14 macro-categorie + 15 tag 'Scuola'). Sistema MONOTAG: un solo tag per libro. Regole complete di attribuzione in TAGGING_RULES.md. Fonte di verità per il criterio 'già in regola' di ibs_description_embedder.py (VALID_TAGS).",
+  "_note_scuola": "I tag 'Scuola *' sono riservati a libri di testo, manuali scolastici, antologie per lo studio e dispense. Un saggio divulgativo NON è 'Scuola *' anche se tratta la stessa materia.",
+  "_tag_legacy": ["Guida", "calibre"],
+  "macro_categorie": [
+    {
+      "tag": "Filosofia Mitologia Religione",
+      "ambito": "Filosofia (storia e testi), teologia, religioni e tradizioni spirituali, mitologia, esoterismo 'classico' e studi religiosi. Categoria più popolata (~21%)."
+    },
+    {
+      "tag": "Storia e Biografie",
+      "ambito": "Storia in ogni ambito (antica, medievale, moderna, contemporanea), biografie, autobiografie, memorie, diari. (~21%)"
+    },
+    {
+      "tag": "Letteratura Romanzi e Racconti",
+      "ambito": "Narrativa: romanzi, racconti, poesia, teatro, classici e contemporanei, letteratura straniera tradotta. (~15%)"
+    },
+    {
+      "tag": "Medicina Psicologia Benessere",
+      "ambito": "Medicina e divulgazione medica, psicologia, psichiatria, salute, benessere, alimentazione salutistica."
+    },
+    {
+      "tag": "Ricette Faidate TempoLibero",
+      "ambito": "Cucina e ricette, hobby, fai-da-te, giardinaggio, sport, giochi, manuali pratici del tempo libero."
+    },
+    {
+      "tag": "Società e Costume",
+      "ambito": "Sociologia, antropologia, costume, attualità, politica, questioni sociali, gender, migrazioni."
+    },
+    {
+      "tag": "Arte Musica Spettacolo",
+      "ambito": "Storia dell'arte, artisti, architettura, cinema, teatro, musica, fotografia, design."
+    },
+    {
+      "tag": "Scienza",
+      "ambito": "Scienza GENERICA o trasversale: ambiente, ecologia, biologia, zoologia, divulgazione scientifica mista, storia della scienza. È la categoria 'resto' scientifica."
+    },
+    {
+      "tag": "Fisica Astrofisica Astronomia",
+      "ambito": "Fisica in senso lato (classica, quantistica, particellare), cosmologia, astrofisica, astronomia, divulgazione fisica (Kaku, Feynman, Hawking...)."
+    },
+    {
+      "tag": "Informatica",
+      "ambito": "Informatica, programmazione, computer, tecnologia digitale, AI, internet."
+    },
+    {
+      "tag": "Viaggi e Avventura",
+      "ambito": "Diari di viaggio, esplorazioni, avventure, montagna, reportage geografici."
+    },
+    {
+      "tag": "Matematica",
+      "ambito": "Matematica, logica, divulgazione matematica, statistica divulgativa."
+    },
+    {
+      "tag": "Misteri Fantastico Esoterismo",
+      "ambito": "Gialli/mystery non 'letteratura', fantasy, paranormali, ufologia, esoterismo popolare."
+    },
+    {
+      "tag": "Enciclopedie Dizionari Manuali",
+      "ambito": "Opere di riferimento: enciclopedie, dizionari, atlanti, manuali generali."
+    }
+  ],
+  "scuola": [
+    { "tag": "Scuola Arte" },
+    { "tag": "Scuola Biologia" },
+    { "tag": "Scuola Chimica" },
+    { "tag": "Scuola Diritto e Economia" },
+    { "tag": "Scuola Economia Aziendale" },
+    { "tag": "Scuola Economia Politica" },
+    { "tag": "Scuola Filosofia" },
+    { "tag": "Scuola Fisica" },
+    { "tag": "Scuola Geografia" },
+    { "tag": "Scuola Informatica" },
+    { "tag": "Scuola Latino" },
+    { "tag": "Scuola Lingua Italiana e Letteratura" },
+    { "tag": "Scuola Lingue" },
+    { "tag": "Scuola Matematica" },
+    { "tag": "Scuola Storia" }
+  ],
+  "tutti_i_31_tag": [
+    "Filosofia Mitologia Religione",
+    "Storia e Biografie",
+    "Letteratura Romanzi e Racconti",
+    "Medicina Psicologia Benessere",
+    "Ricette Faidate TempoLibero",
+    "Società e Costume",
+    "Arte Musica Spettacolo",
+    "Scienza",
+    "Fisica Astrofisica Astronomia",
+    "Informatica",
+    "Viaggi e Avventura",
+    "Matematica",
+    "Misteri Fantastico Esoterismo",
+    "Enciclopedie Dizionari Manuali",
+    "Scuola Arte",
+    "Scuola Biologia",
+    "Scuola Chimica",
+    "Scuola Diritto e Economia",
+    "Scuola Economia Aziendale",
+    "Scuola Economia Politica",
+    "Scuola Filosofia",
+    "Scuola Fisica",
+    "Scuola Geografia",
+    "Scuola Informatica",
+    "Scuola Latino",
+    "Scuola Lingua Italiana e Letteratura",
+    "Scuola Lingue",
+    "Scuola Matematica",
+    "Scuola Storia"
+  ]
+}
