@@ -22,8 +22,11 @@ Basato su ibs_fast_metadata_search.py, con questi fix:
      (convenzione calibre per le descrizioni non HTML).
   4. Riscrittura ZIP conforme: "mimetype" resta la prima entry,
      non compressa (STORED), come richiede lo standard EPUB.
-  5. Se l'EPUB ha già una descrizione non vuota, viene saltato
-     (usare --force per sovrascrivere).
+  5. Criterio "già in regola": il MONOTAG. Se l'EPUB ha esattamente un
+     dc:subject coincidente con uno dei 31 tag ufficiali, viene saltato
+     (anche senza descrizione, es. not_found). Senza monotag ma con
+     descrizione pre-esistente viene comunque saltato (usare --force
+     per sovrascrivere, --tag per classificarlo).
   6. RINOMINA AUTOMATICA: ogni epub processato viene rinominato
      "<Autore> - <Titolo completo>.epub". Fonte del nome, in ordine di
      affidabilità: match IBS.it (titolo/autore verificati sul sito) ->
@@ -112,6 +115,62 @@ BOILERPLATE = re.compile(
     r'leggi\s+di\s+(?:pi[ùu]|meno)|leggi\s+tutto', re.IGNORECASE)
 SKIP_SECTION = re.compile(
     r'show-more|clamp-trigger|pdp-tags|accordion', re.IGNORECASE)
+
+# ---------------------------------------------------------------------------
+# Criterio "file già in regola": il MONOTAG.
+# La presenza di ESATTAMENTE un dc:subject coincidente (case-insensitive)
+# con uno dei 31 tag ufficiali (TAGGING_RULES.md) è il contrassegno di
+# file processato: nessun'altra fonte scrive questi tag, quindi è un
+# fingerprint affidabile che viaggia col file. Un file taggato ma senza
+# descrizione (es. not_found su IBS) è comunque "in regola".
+# ---------------------------------------------------------------------------
+VALID_TAGS = frozenset([
+    # 14 macro-categorie
+    'Filosofia Mitologia Religione',
+    'Storia e Biografie',
+    'Letteratura Romanzi e Racconti',
+    'Medicina Psicologia Benessere',
+    'Ricette Faidate TempoLibero',
+    'Società e Costume',
+    'Arte Musica Spettacolo',
+    'Scienza',
+    'Fisica Astrofisica Astronomia',
+    'Informatica',
+    'Viaggi e Avventura',
+    'Matematica',
+    'Misteri Fantastico Esoterismo',
+    'Enciclopedie Dizionari Manuali',
+    # 15 tag "Scuola"
+    'Scuola Arte', 'Scuola Biologia', 'Scuola Chimica',
+    'Scuola Diritto e Economia', 'Scuola Economia Aziendale',
+    'Scuola Economia Politica', 'Scuola Filosofia', 'Scuola Fisica',
+    'Scuola Geografia', 'Scuola Informatica', 'Scuola Latino',
+    'Scuola Lingua Italiana e Letteratura', 'Scuola Lingue',
+    'Scuola Matematica', 'Scuola Storia',
+])
+
+
+def _norm_tag(s):
+    """Normalizza un tag per il confronto: spazi collassati + casefold."""
+    return re.sub(r'\s+', ' ', s).strip().casefold()
+
+
+_VALID_TAGS_NORM = {_norm_tag(t): t for t in VALID_TAGS}
+
+
+def read_subjects(data):
+    """Elenca i dc:subject (unescaped, stripped) dall'OPF serializzato."""
+    import html as _html
+    return [_html.unescape(s).strip()
+            for s in re.findall(r'<dc:subject[^>]*>(.*?)</dc:subject>',
+                                data, re.S)]
+
+
+def monotag_ok(subjects):
+    """True se c'è esattamente un subject e coincide (case-insensitive)
+    con uno dei 31 tag ufficiali del sistema di classificazione."""
+    return (len(subjects) == 1
+            and _norm_tag(subjects[0]) in _VALID_TAGS_NORM)
 
 
 # ---------------------------------------------------------------------------
@@ -1009,9 +1068,13 @@ def covalidate_file(path, tag=None, backup_path=None):
     3) sistema monotag: un solo dc:subject, uguale al tag richiesto;
     4) filename conforme ad 'Autore - Titolo.epub';
     5) dc:title/dc:creator IDENTICI al backup originale.
-    Ritorna la lista dei problemi (vuota = tutto ok)."""
+    Criterio monotag: un file con monotag valido ma senza descrizione
+    (es. not_found su IBS) è in regola -> la descrizione mancante diventa
+    una nota (warning), non un problema (FAIL).
+    Ritorna (issues, warnings): issues vuota = tutto ok."""
     import html as _html
     issues = []
+    warnings = []
     try:
         z = zipfile.ZipFile(path)
         infos = z.infolist()
@@ -1021,21 +1084,23 @@ def covalidate_file(path, tag=None, backup_path=None):
         opf_path = read_opf_path(path)
         if not opf_path:
             issues.append('OPF non leggibile')
-            return issues
+            return issues, warnings
         data = z.read(opf_path).decode('utf-8')
     except Exception as e:
-        return ['EPUB non leggibile: %s' % e]
+        return ['EPUB non leggibile: %s' % e], warnings
 
     m = re.search(r'<dc:description[^>]*>(.*?)</dc:description>', data, re.S)
     desc = _html.unescape(m.group(1)) if m else ''
+    subs = read_subjects(data)
     if not desc.strip():
-        issues.append('dc:description assente o vuota')
+        if monotag_ok(subs):
+            warnings.append('descrizione assente ma monotag valido "%s": '
+                            'in regola (descrizione non disponibile)'
+                            % subs[0])
+        else:
+            issues.append('dc:description assente o vuota')
     elif HTMLISH.search(desc):
         issues.append('la descrizione contiene markup HTML')
-
-    subs = [_html.unescape(s).strip()
-            for s in re.findall(r'<dc:subject[^>]*>(.*?)</dc:subject>',
-                                data, re.S)]
     if tag:
         if len(subs) != 1 or subs[0] != tag:
             issues.append('dc:subject atteso "%s", trovati %d %s'
@@ -1060,7 +1125,7 @@ def covalidate_file(path, tag=None, backup_path=None):
                     issues.append('%s modificato rispetto al backup' % label)
         except Exception as e:
             issues.append('backup non confrontabile: %s' % e)
-    return issues
+    return issues, warnings
 
 
 def process_epub(epub_path, session, backup_dir, force, dry_run,
@@ -1144,11 +1209,28 @@ def process_epub(epub_path, session, backup_dir, force, dry_run,
                 name = res['file'] = os.path.basename(new_path)
                 res['path'] = epub_path
 
+    # --- criterio "già in regola": monotag valido, altrimenti descrizione ---
+    try:
+        with zipfile.ZipFile(epub_path) as z:
+            opf_data = z.read(opf_path).decode('utf-8')
+    except Exception:
+        opf_data = ''
+    subs = read_subjects(opf_data)
     existing = read_existing_description(epub_path, opf_path)
-    if existing and not force and not tag:
-        res['status'] = 'skipped'
-        res['detail'] = 'descrizione già presente (%d char)' % len(existing)
-        return res
+    if not force and not tag:
+        if monotag_ok(subs):
+            res['status'] = 'skipped'
+            res['detail'] = ('in regola: monotag valido "%s"%s'
+                             % (subs[0],
+                                '' if existing else
+                                ' (descrizione non disponibile)'))
+            return res
+        if existing:
+            res['status'] = 'skipped'
+            res['detail'] = ('descrizione già presente (%d char), '
+                             'ma senza monotag valido: serve --tag '
+                             'per classificarlo' % len(existing))
+            return res
 
     if not cand_title:
         res['status'] = 'error'
@@ -1276,7 +1358,7 @@ def main():
             backup_name = r.get('renamed_from',
                                 os.path.basename(r['path'])) \
                 if r.get('backed_up') else None
-            issues = covalidate_file(
+            issues, warns = covalidate_file(
                 r['path'], tag=args.tag,
                 backup_path=(os.path.join(args.backup_dir, backup_name)
                              if backup_name else None))
@@ -1289,6 +1371,10 @@ def main():
             else:
                 coval['ok'] += 1
                 log('   [OK]   %s' % r['file'])
+                if warns:
+                    coval.setdefault('warnings', {})[r['file']] = warns
+                    for w in warns:
+                        log('          - nota: %s' % w)
         log('Covalida: %d OK, %d con problemi su %d verificati' % (
             coval['ok'], coval['failed'], coval['ok'] + coval['failed']))
 
