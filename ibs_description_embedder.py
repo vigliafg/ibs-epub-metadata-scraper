@@ -78,6 +78,7 @@ from bs4 import BeautifulSoup, NavigableString, Tag
 BASE_URL = 'https://www.ibs.it/'
 GOOGLE_BOOKS_URL = 'https://www.googleapis.com/books/v1/volumes'
 OPENLIB_URL = 'https://openlibrary.org'
+AMAZON_URL = 'https://www.amazon.it'
 # opzionale: chiave API gratuita di Google Cloud per sollevare la quota
 # anonima (spesso esaurita: HTTP 429). Env: GOOGLE_BOOKS_API_KEY
 GOOGLE_API_KEY = os.environ.get('GOOGLE_BOOKS_API_KEY', '')
@@ -89,8 +90,17 @@ ALGOLIA_URL = 'https://%s-dsn.algolia.net/1/indexes/%s/query' % (
 
 HEADERS = {
     'User-Agent': ('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 '
-                   '(KHTML, like Gecko) Chrome/120.0 Safari/537.36'),
-    'Accept-Language': 'it-IT,it;q=0.9',
+                   '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'),
+    'Accept': ('text/html,application/xhtml+xml,application/xml;q=0.9,'
+               'image/avif,image/webp,*/*;q=0.8'),
+    'Accept-Language': 'it-IT,it;q=0.9,en;q=0.8',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Upgrade-Insecure-Requests': '1',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'none',
+    'Sec-Fetch-User': '?1',
+    'Connection': 'keep-alive',
 }
 TIMEOUT = 30
 
@@ -450,6 +460,95 @@ def search_openlibrary(session, ean=None, author='', title='', min_score=0):
     return None
 
 
+def _amazon_captcha(html_text):
+    return bool(re.search(r'captcha|Enter the characters|api-services-support',
+                          html_text, re.I))
+
+
+def search_amazon(session, query, ean=None, author='', title='',
+                  min_score=0, max_products=3):
+    """Ultima rete: Amazon.it (scraping, nessuna API pubblica).
+    Ricerca -> primi ASIN organici -> pagina prodotto (titolo, autore,
+    descrizione dal div bookDescription). Si interrompe al primo CAPTCHA.
+    Ritorna un dict compatibile (+ 'source': 'amazon') o None."""
+    import html as _html
+    try:
+        resp = session.get('%s/s' % AMAZON_URL, params={'k': ean or query},
+                           timeout=TIMEOUT)
+        resp.raise_for_status()
+        sh = resp.text
+    except Exception:
+        return None
+    if _amazon_captcha(sh):
+        log('Amazon: CAPTCHA sulla ricerca, fallback disattivato')
+        return None
+    asins = []
+    for m in re.finditer(r'data-asin="([0-9B][0-9A-Z]{9})"', sh):
+        if m.group(1) not in asins:
+            asins.append(m.group(1))
+    for asin in asins[:max_products]:
+        time.sleep(1)
+        try:
+            resp = session.get('%s/dp/%s' % (AMAZON_URL, asin),
+                               timeout=TIMEOUT)
+            resp.raise_for_status()
+            ph = resp.text
+        except Exception:
+            continue
+        if _amazon_captcha(ph):
+            log('Amazon: CAPTCHA sulla pagina prodotto, fallback disattivato')
+            return None
+        m = re.search(r'<span id="productTitle"[^>]*>\s*([^<]+?)\s*<', ph)
+        atitle = m.group(1).strip() if m else ''
+        if not atitle:
+            continue
+        # autore dalla byline: "di <Nome> (Autore)"
+        aauthor = ''
+        bi = ph.find('id="bylineInfo"')
+        if bi >= 0:
+            btxt = _html.unescape(re.sub(
+                r'<[^>]+>', '\n', ph[bi:bi + 2500]))
+            blines = [l.strip() for l in btxt.splitlines() if l.strip()]
+            for j, l in enumerate(blines):
+                if l.lower() == 'di' and j + 1 < len(blines):
+                    aauthor = re.sub(r'\s*\([^)]*\)\s*$', '',
+                                     blines[j + 1]).strip()
+                    break
+        # descrizione dal div bookDescription (testo puro, paragrafi);
+        # la descrizione sta DENTRO l'expander: niente taglio su
+        # 'a-expander' (appare negli attributi), si filtrano i paragrafi
+        adesc = ''
+        di = ph.find('bookDescription_feature_div')
+        if di >= 0:
+            gt = ph.find('>', di)
+            chunk = ph[gt + 1:gt + 40000]
+            chunk = re.sub(r'<script.*?</script>', '', chunk, flags=re.S)
+            txt = _html.unescape(re.sub(r'<[^>]+>', '\n\n', chunk))
+            paras = [re.sub(r'\s+', ' ', p).strip()
+                     for p in re.split(r'\n\s*\n', txt)]
+            out = []
+            for p in paras:
+                if re.search(r'recensioni clienti|visualizza tutti|'
+                             r'dettagli prodotto|feedback|aggiungi al carrello',
+                             p, re.I):
+                    break
+                if len(p) > 40:
+                    out.append(p)
+            adesc = '\n\n'.join(out[:10])
+        r = {
+            'title': atitle,
+            'url': '%s/dp/%s' % (AMAZON_URL, asin),
+            'isbn': ean or '',
+            'author': aauthor,
+            'source': 'amazon',
+            'description': adesc,
+        }
+        if min_score and match_score(r, author, title) < min_score:
+            continue
+        return r
+    return None
+
+
 def _words(text):
     """Parole significative per il matching (senza stopwords)."""
     stop = {'di', 'de', 'del', 'della', 'delle', 'dei', 'degli', 'la', 'le',
@@ -563,6 +662,12 @@ def find_book_smart(session, epub_path, opf_path, cand_author, cand_title,
     # 6) Open Library: seconda rete senza chiavi API
     m = search_openlibrary(session, ean=ean, author=cand_author,
                            title=cand_title, min_score=30)
+    if m:
+        return m
+    # 7) Amazon.it: ultima rete (scraping, uso contenuto)
+    m = search_amazon(session, '%s %s' % (cand_author, cand_title),
+                      ean=ean, author=cand_author, title=cand_title,
+                      min_score=30)
     if m:
         return m
     return None
@@ -909,7 +1014,7 @@ def process_epub(epub_path, session, backup_dir, force, dry_run,
                 res['matched_url'] = match['url']
                 res['isbn'] = match['isbn']
                 res['match_source'] = match.get('source', 'ibs')
-                if match.get('source') == 'google':
+                if match.get('source') != 'ibs':
                     res['description'] = match.get('description') or ''
                 else:
                     res['description'] = get_description(match['url'],
@@ -968,7 +1073,7 @@ def process_epub(epub_path, session, backup_dir, force, dry_run,
         res['detail'] = 'nessun match affidabile (IBS.it / Google Books)'
         return res
 
-    if match.get('source') == 'google':
+    if match.get('source') != 'ibs':
         description = match.get('description') or ''
     else:
         description = get_description(match['url'], session)
