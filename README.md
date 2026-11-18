@@ -1,552 +1,204 @@
 # IBS EPUB Metadata Scraper
 
-> **Arricchisci i tuoi EPUB con metadati da IBS.it** — ricerca automatica, estrazione e embedding di metadati (ISBN, editore, descrizione, lingua, pagine) direttamente nel file EPUB.
+> **Strumento principale: `ibs_description_embedder.py`** — arricchisce gli EPUB con la descrizione ufficiale di IBS.it (testo puro), il tag classificatore della libreria (sistema monotag) e rinomina i file secondo il pattern `<Autore> - <Titolo>.epub`.
 
-Tre script Python per cercare e incorporare metadati librari in file EPUB, partendo dal nome del file (formato `Autore - Titolo.epub`).
-
-Include anche una **interfaccia GUI** moderna per chi preferisce non usare la riga di comando.
-
----
-
-## 📋 Tabella Comparativa
-
-| Caratteristica | `ibs_fast_metadata_search.py` 🏆 | `ibs_metadata_search.py` | `gui_ibs_fast_metadata_search.py` 🖥️ |
-|---|---|---|---|
-| **Tipo** | CLI | CLI | GUI (customtkinter) |
-| **Sorgente** | IBS.it (API Algolia diretta) | IBS.it (Algolia via Playwright) | IBS.it (API Algolia diretta) |
-| **Velocità** | ⚡ **1.1 sec/libro** | 🐢 ~8-15 sec/libro | ⚡ **come ibs_fast** |
-| **Success rate** | **100%** su test 49 libri | Non testato | Come ibs_fast |
-| **Browser richiesto** | ❌ Nessuno | ✅ Playwright | ❌ Nessuno |
-| **Dipendenze** | `requests`, `beautifulsoup4` | `requests`, `beautifulsoup4`, `playwright` | + `customtkinter` |
-| **Log in tempo reale** | ❌ Solo terminale | ❌ Solo terminale | ✅ GUI con colori |
-| **Selezione directory** | CLI args | CLI args | ✅ GUI con Browse… |
-| **Opzioni** | `--force`, `--json-only` | `--force`, `--json-only` | ✅ Checkboxes |
+Il repo contiene anche alcuni tool legacy (vedi [Tool legacy](#-tool-legacy) in fondo).
 
 ---
 
 ## 📦 Installazione
 
-### Dipendenze comuni
+Requisiti: **Python 3.8+** con `requests` e `beautifulsoup4`:
 
 ```bash
 pip install requests beautifulsoup4
+# oppure
+pip install -r requirements.txt
 ```
 
-### Per `ibs_fast_metadata_search.py` — solo richieste HTTP
+Nessun browser, nessuna chiave API obbligatoria. Facoltativo: una chiave Google Books (gratuita, da Google Cloud) per alzare la quota anonima del fallback Google Books:
 
 ```bash
-# Nessun'altra dipendenza necessaria
-```
-
-### Per `gui_ibs_fast_metadata_search.py` — interfaccia grafica
-
-```bash
-pip install customtkinter
-```
-
-L'interfaccia GUI richiede anche `requests` e `beautifulsoup4` (già elencati sopra).
-
-### Per `ibs_metadata_search.py` — richiede Playwright
-
-```bash
-pip install playwright
-playwright install chromium
+export GOOGLE_BOOKS_API_KEY="la-tua-chiave"
 ```
 
 ---
 
 ## 🚀 Utilizzo
 
-### 🖥️ GUI (`gui_ibs_fast_metadata_search.py`)
-
 ```bash
-python gui_ibs_fast_metadata_search.py
+python3 ibs_description_embedder.py <file.epub | directory> [...] [opzioni]
 ```
 
-L'interfaccia grafica permette di:
-- **Selezionare la cartella** di lavoro con un dialogo Browse…
-- **Scegliere le opzioni** tramite checkbox (`--force`, `--json-only`, `--verbose`)
-- **Avviare la pipeline** con un clic e **visualizzare il log in tempo reale** colorato nella finestra
-- **Fermare** l'esecuzione in qualsiasi momento
+Accetta uno o più file `.epub` oppure directory (processa tutti gli `.epub` dentro).
+Log su **stderr**, risultati completi in **JSON su stdout** (con `--json`).
 
-> La GUI usa `customtkinter` per un look moderno e scuro, e aggiorna il log in tempo reale attraverso un thread separato.
+### Opzioni
 
-### ⌨️ CLI
+| Opzione | Effetto |
+|---|---|
+| `--tag "TAG"` | Embed del tag classificatore come `<dc:subject>` (sistema monotag: un solo tag, i subject pre-esistenti vengono sostituiti) |
+| `--suggest-tags` | Sola lettura: stampa autore/titolo/descrizione (JSON) per decidere il tag giusto. **Non modifica né rinomina nulla** |
+| `--force` | Sovrascrive anche descrizioni esistenti e file già in regola |
+| `--no-rename` | Disattiva la rinomina automatica |
+| `--backup-dir DIR` | Cartella di backup degli originali (default: `origins/`) |
+| `--dry-run` | Mostra cosa farebbe senza toccare nulla |
+| `--json` | Stampa i risultati in JSON su stdout |
 
-Entrambi gli script CLI condividono la stessa interfaccia a riga di comando:
+### Workflow tipico
 
 ```bash
-python <script>.py <directory> [--force] [--json-only] [--delay N]
+# 1) Ispezione: cosa contiene il libro? (nessuna modifica)
+python3 ibs_description_embedder.py ~/Scaricati/*.epub --suggest-tags
+
+# 2) Si sceglie UN tag dal sistema di classificazione (31 tag, vedi
+#    TAGGING_RULES.md) e si esegue: descrizione + tag + rinomina in un colpo
+python3 ibs_description_embedder.py ~/Scaricati/*.epub --tag "Fisica Astrofisica Astronomia"
 ```
 
-### Esempi
+Il tag viene scelto dall'operatore (o dall'assistente AI) secondo `TAGGING_RULES.md`; lo script esegue solo.
 
-```bash
-# Scansione interattiva (chiede conferma prima dell'embedding)
-python ibs_fast_metadata_search.py ./libri/
+---
 
-# Solo scraping, nessun embedding (produce metadata_batch.json)
-python ibs_fast_metadata_search.py ./libri/ --json-only
+## ✅ Criterio "già in regola": il monotag
 
-# Scraping + embedding automatico (nessuna conferma)
-python ibs_fast_metadata_search.py ./libri/ --force
+Un file è considerato **già processato** se ha **esattamente un `dc:subject` coincidente con uno dei 31 tag ufficiali** (14 macro-categorie + 15 "Scuola *", elencati in `TAGGING_RULES.md` e hardcoded come `VALID_TAGS` nello script; confronto case-insensitive).
 
-# Con delay personalizzato (solo per ibs_metadata_search)
-python ibs_metadata_search.py ./libri/ --delay 2.0
-```
+Perché questo criterio:
 
-### Argomenti
+- I 31 tag sono **vocabolario proprietario** della libreria: nessun publisher o z-lib li scrive → fingerprint affidabile del nostro pipeline;
+- **viaggia col file** (rename, spostamenti, copie non lo perdono);
+- un file **taggato ma senza descrizione** (es. descrizione non disponibile su IBS) è comunque in regola → nessun ri-tentativo sprecato alle passate successive.
 
-| Argomento | Default | Descrizione |
+Ordine di skip (salvo `--force`):
+
+1. monotag valido → `[SKIP] in regola: monotag valido "…"`
+2. descrizione pre-esistente ma senza monotag valido → `[SKIP]` con nota "serve `--tag` per classificarlo" (non si sovrascrivono descrizioni di terzi senza `--force`)
+3. né tag né descrizione → si processa
+
+---
+
+## ✏️ Rinomina automatica (default ON, `--no-rename` per disattivare)
+
+Ogni epub processato viene rinominato **`<Autore> - <Titolo completo>.epub`**. Il nome è preso dalla fonte più affidabile disponibile:
+
+| Priorità | Fonte | Note |
 |---|---|---|
-| `working_dir` | (obbligatorio) | Directory contenente i file `.epub` |
-| `--force`, `-f` | `False` | Salta la conferma prima dell'embedding |
-| `--json-only` | `False` | Solo scraping, salta embedding |
-| `--delay` | 2.0s (ibs legacy), 0s (ibs-fast) | Delay tra richieste |
-| `--verbose`, `-v` | `False` | Output verboso (non implementato in tutti) |
+| 1 | **Match IBS.it** | Titolo/autore verificati sul catalogo |
+| 2 | **Metadati OPF** | `dc:creator`/`dc:title` interni (sottotitolo EPUB3 appendato con `: `) |
+| 3 | **Nome file attuale** | Solo pulizia |
+
+La catena di match condivisa con la descrizione (vedi sotto) include anche deep scan e fallback esterni, quindi la rinomina sfrutta la stessa verifica.
+
+Pulizia del filename:
+
+- spazzatura tipo `(z-lib.org)`, `[English]` rimossa;
+- separatori laschi normalizzati (`_-_` → ` - `);
+- `:` → `. ` nei sottotitoli (convenzione libreria "Titolo. Sottotitolo");
+- caratteri illegali sanificati;
+- collisioni → suffisso ` (2)`, ` (3)`…
+
+L'originale col nome pre-rinomina è sempre nel backup (`origins/`). La rinomina avviene **anche** se la descrizione non è disponibile. Report: `[RENAME] vecchio -> nuovo (fonte: ibs|opf|filename)` e campi JSON `renamed_from` / `renamed_to` / `rename_source`.
 
 ---
 
-## 🧠 Script Dettaglio
+## 🔎 Catena di match (7 livelli, in ordine di affidabilità)
 
-### 1️⃣ `ibs_fast_metadata_search.py` — Il Più Veloce (Consigliato)
+`find_book_smart()` prova in sequenza e si ferma al primo match affidabile:
 
-> CLI veloce consigliata per automazione e scripting.
-
-### 1b️⃣ `gui_ibs_fast_metadata_search.py` — Interfaccia Grafica (Consigliato per uso interattivo)
-
-> Interfaccia GUI completa che usa `ibs_fast_metadata_search.py` internamente. Ideale per chi preferisce non usare la riga di comando.
-
-**Caratteristiche:**
-- Finestra moderna con tema scuro (`customtkinter`)
-- Selezione directory con dialogo nativo
-- Checkbox per tutte le opzioni: `--force`, `--json-only`, `--verbose`
-- Log in tempo reale colorato (verde = successo, rosso = errore, giallo = warning)
-- Pulsante **Stop** per interrompere l'esecuzione
-- Barra di stato con stato corrente
-
-**Screenshot quick-start:**
-```
-1. Clicca "Browse…" → seleziona la cartella con i tuoi .epub
-2. Spunta le opzioni desiderate:
-   □ --force   (salta conferma embedding, embed automatico)
-   □ --json-only (solo scraping, nessun embedding)
-3. Clicca "▶ Run Pipeline"
-4. Guarda il log scorrere in tempo reale nella finestra
-```
-
-### 2️⃣ `ibs_metadata_search.py` — Versione Playwright
-
-> **Strategia**: usa **Playwright** per caricare la pagina di ricerca di IBS.it, intercettare la risposta XHR di Algolia, ed estrarre i dati strutturati dal JSON.
-
-**Come funziona:**
-1. Avvia un browser Chrome headless via Playwright
-2. Naviga a `ibs.it/algolia-search?ts=as&query=...`
-3. Intercetta la risposta dell'API Algolia usando `page.on('response')`
-4. Estrae i dati strutturati dal JSON
-5. Fa una richiesta HTTP (con `requests`) alla pagina dettaglio per descrizione e pagine
-6. Opzionalmente: embedding dei metadati
-
-**Vantaggi:**
-- Robustezza (se l'API Algolia cambia, Playwright può adattarsi)
-- Approccio simile a un utente reale (carica JavaScript, cookie, sessioni)
-
-**Svantaggi:**
-- 🐢 Lento (richiede ~2-3 secondi per navigazione + rendering)
-- 🐘 Richiede Playwright + Chromium (~300 MB extra)
-- ❌ Può fallire se Chrome non è installato o non accessibile
+1. **EAN/ISBN esatto** — da `dc:identifier` dell'OPF (ISBN-10 convertito in EAN-13) o da filename numerico;
+2. **Ricerca a parole su IBS.it** (API Algolia pubblica) con autore+titolo e scoring di pertinenza (match sotto soglia scartati);
+3. **Ruoli invertiti** — per file nominati "Titolo - Autore";
+4. **Deep scan** — lettura *non distruttiva* delle prime pagine dello spine (frontespizio + copyright): ISBN nel testo → match esatto; altrimenti candidati-titolo dalla sola prima pagina (filtro anti-falsi-positivi);
+5. **Google Books** — per libri stranieri non a catalogo IBS (EAN esatto o ricerca a parole, `min_score 30`; descrizione HTML convertita in testo puro; quota anonima spesso esaurita → HTTP 429, con `GOOGLE_BOOKS_API_KEY` si alza);
+6. **Open Library** — senza chiavi (`api/books?jscmd=data` per ISBN, `search.json` a parole; note/excerpt pulite a testo puro);
+7. **Amazon** — ultima rete, marketplace in ordine `.it` → `.com` → `.co.uk` (i libri in inglese matchano sui marketplace anglofoni con descrizione in lingua originale; scraping senza API pubblica: search → primi ASIN organici → pagina prodotto `productTitle`/byline/descrizione; richiede header browser-fingerprint completi, altrimenti serve un challenge `bm-verify`; CAPTCHA rilevato → marketplace successivo; max 3 pagine prodotto per marketplace con `sleep(1)` fra loro; `min_score 30` per scartare sponsored; sorgente etichettata col dominio, es. `amazon.com`).
 
 ---
 
-## 📁 Pipeline Output
+## 📝 Descrizione: testo puro, sempre
 
-Eseguito con `--force` su una directory, lo script:
+- Estratta a **blocchi** dalla pagina di dettaglio IBS.it: niente code "Argomenti…", niente "Leggi di più/meno", paragrafi veri;
+- serializzata in **testo puro** con paragrafi separati da riga vuota (`\n\n`) — convenzione calibre per le descrizioni non HTML. **Mai HTML arricchito** (requisito esplicito);
+- scritta in `dc:description` XML-escaped verbatim: calibre la rilegge identica;
+- per i fallback (Google Books / Open Library / Amazon) l'HTML delle descrizioni viene convertito in testo puro prima dell'embedding.
 
-1. **Scarica metadati** da IBS.it
-2. **Copia backup originali** in `origins/`
-3. **Riscrive gli EPUB** con metadati arricchiti, spostandoli in `embedded/`
-4. **Sposta i non trovati** in `notfound/`
-5. **Genera report HTML** e **JSON** dei risultati
+---
 
-### Struttura directory dopo pipeline
+## 🧷 Integrità dell'EPUB
+
+Lo script modifica **solo** `dc:description` e `dc:subject` nell'OPF. Mai toccati: `dc:title`, `dc:creator`, `dc:publisher`, `dc:identifier` (dentro il file — la rinomina agisce sul solo filename).
+
+La riscrittura ZIP è conforme allo standard EPUB: **`mimetype` resta la prima entry, non compressa (`ZIP_STORED`)**.
+
+---
+
+## 🩺 Covalida finale (last-look)
+
+A fine job ogni file toccato viene **riletto** e verificato (lettura non distruttiva):
+
+1. integrità ZIP + `mimetype` prima entry STORED;
+2. `dc:description` presente e in testo puro (mai markup HTML);
+3. monotag: un solo `dc:subject`, uguale al tag richiesto;
+4. filename conforme ad `Autore - Titolo.epub`;
+5. `dc:title`/`dc:creator` identici al backup originale.
+
+Esito: `[OK]` / `[FAIL]` con elenco dei problemi. Con monotag valido ma descrizione non disponibile (es. `not_found` su IBS) il file è `[OK]` con una **nota**, non un FAIL — coerenza col criterio monotag.
+
+---
+
+## 📁 Struttura dopo l'esecuzione
 
 ```
-📂 libri/
-├── 📁 origins/              # Backup degli EPUB originali
-│   ├── Autore - Titolo.epub
-│   └── ...
-├── 📁 embedded/             # EPUB con metadati arricchiti
-│   ├── Autore - Titolo.epub
-│   └── ...
-├── 📁 notfound/             # EPUB non trovati online
-├── 📄 metadata_batch.json   # Metadati in formato JSON
-├── 📄 pipeline_report.html  # Report HTML della pipeline
-├── 📄 metadata_report.html  # Report dei metadati embeddati
-└── 📄 pipeline.log          # Log dettagliato
+📂 cartella/
+├── *.epub                  # file processati e rinominati
+└── 📁 origins/             # backup degli originali (nome pre-rinomina)
 ```
 
-### Formato `metadata_batch.json`
+Gli skip non modificano nulla; i file non trovati restano al loro posto (segnalati in log/JSON).
 
-```json
-{
-  "scrape_time": "2026-05-27 12:30:00",
-  "source": "ibs.it (fast)",
-  "stats": {
-    "total": 49,
-    "success": 49,
-    "failed": 0,
-    "notfound": 0
-  },
-  "books": [
-    {
-      "author": "Philip K. Dick",
-      "title": "L'Invasione Divina",
-      "filename": "Philip K. Dick - L'Invasione Divina.epub",
-      "status": "success",
-      "metadata": {
-        "title": "L'Invasione Divina",
-        "author": "Philip K. Dick",
-        "isbn": "9788804758000",
-        "publisher": "Mondadori",
-        "published_date": "2023",
-        "pages": "384",
-        "language": "it",
-        "description": "...",
-        "series": "Oscar fantastica",
-        "matched_url": "https://www.ibs.it/..."
-      }
-    }
-  ]
-}
+---
+
+## 🧪 Esempi
+
+```bash
+# Ispezione di un singolo file
+python3 ibs_description_embedder.py "Autore - Titolo.epub" --suggest-tags
+
+# Prova generale su una cartella, senza toccare nulla
+python3 ibs_description_embedder.py ~/Scaricati/ --dry-run
+
+# Descrizione + tag + rinomina su tutta la cartella
+python3 ibs_description_embedder.py ~/Scaricati/ --tag "Storia e Biografie"
+
+# Solo rinomina (descrizioni già presenti verranno skipppate, ma i file
+# senza monotag valido vengono comunque rinominati)
+python3 ibs_description_embedder.py ~/Scaricati/ --no-rename   # ometti --no-rename per rinominare
+
+# Risultati machine-readable
+python3 ibs_description_embedder.py ~/Scaricati/ --tag "Informatica" --json | jq '.stats'
 ```
 
 ---
 
-## 🏆 Raccomandazioni
+## ⚠️ Limiti noti
 
-| Scenario | Script consigliato |
+- **Descrizioni IBS mancanti**: alcuni titoli non hanno descrizione sul sito (`NOT_FOUND`) — il file viene comunque rinominato e, se taggato, è in regola;
+- **Quota Google Books anonima** spesso esaurita (HTTP 429): serve `GOOGLE_BOOKS_API_KEY` per un uso intensivo del fallback;
+- **Amazon**: scraping senza API ufficiale — soggetto a CAPTCHA/challenge; lo script li rileva e passa al marketplace successivo;
+- **Sequenziale**: un file alla volta (il collo di bottiglia è la latenza di rete della catena di fallback, worst case ~10–20s/file).
+
+---
+
+## 🗂️ Tool legacy
+
+Script più vecchi, mantenuti per riferimento (documentazione estesa nelle git history):
+
+| Script | Note |
 |---|---|
-| **Uso interattivo** — massima semplicità | `gui_ibs_fast_metadata_search.py` |
-| **Uso quotidiano** — massima velocità e qualità | `ibs_fast_metadata_search.py` |
-| **IBS.it cambia API** — fallback con Playwright | `ibs_metadata_search.py` |
-
----
-
-## 🧪 Esempi Avanzati
-
-### 🔀 Usare jq per interrogare i risultati JSON
-
-Dopo uno scraping con `--json-only`, puoi analizzare il JSON con `jq`:
-
-```bash
-# Libri con più di 300 pagine
-cat metadata_batch.json | jq '.books[] | select(.metadata.pages | tonumber? // 0 > 300) | "\(.author) - \(.title) (\(.metadata.pages) pp)"'
-
-# Libri per editore
-cat metadata_batch.json | jq '.books[] | .metadata.publisher' | sort | uniq -c | sort -rn
-
-# Libri per anno di pubblicazione
-cat metadata_batch.json | jq '.books[] | .metadata.published_date' | sort | uniq -c | sort -rn
-
-# Libri senza ISBN (anomalie)
-cat metadata_batch.json | jq '.books[] | select(.metadata.isbn == "") | .filename'
-
-# Statistiche rapide
-cat metadata_batch.json | jq '{total: .stats.total, success: .stats.success, pct: (.stats.success / .stats.total * 100 | floor)}'
-```
-
-### 🔀 Confrontare due esecuzioni sullo stesso dataset
-
-```bash
-# Esegui lo script con --json-only due volte (es. con parametri diversi) e confronta
-python ibs_fast_metadata_search.py ./libri/ --json-only
-mv metadata_batch.json metadata_batch_run1.json
-
-python ibs_fast_metadata_search.py ./libri/ --json-only --delay 1.0
-mv metadata_batch.json metadata_batch_run2.json
-
-# Diff tra i due JSON
-jq -r '.books[] | .filename' metadata_batch_run1.json | sort > run1_files.txt
-jq -r '.books[] | .filename' metadata_batch_run2.json | sort > run2_files.txt
-diff run1_files.txt run2_files.txt
-```
-
-### 🎯 Estrarre solo un campo specifico per tutti i libri
-
-```bash
-# Output: ISBN,Autore,Titolo,Pagine
-cat metadata_batch.json | jq -r '.books[] | select(.status == "success") | [.metadata.isbn, .author, .title, .metadata.pages] | @csv' > isbn_list.csv
-```
-
-### 🔁 Riprocessare solo i libri non trovati
-
-```bash
-python ibs_fast_metadata_search.py ./libri/ --json-only
-
-# Estrai i libri non trovati
-jq -r '.books[] | select(.status != "success") | .filename' metadata_batch.json > notfound.txt
-
-# Crea una directory con solo i non trovati e riprova
-mkdir -p ./retry
-while IFS= read -r f; do
-    cp "./libri/$f" ./retry/
-done < notfound.txt
-
-# Riprova con lo script legacy (Playwright)
-python ibs_metadata_search.py ./retry/ --force
-```
-
-### 📦 Batch processing: più directory in sequenza
-
-```bash
-# Processa tutte le directory di libri in una cartella padre
-for dir in /path/to/libri/*/; do
-    echo "=== Processing $dir ==="
-    python ibs_fast_metadata_search.py "$dir" --json-only
-    mv "$dir/metadata_batch.json" "$dir/metadata_$(date +%Y%m%d).json"
-done
-
-# Con parallel GNU per eseguire più directory in parallelo
-echo "/path/to/libri/fiction
-/path/to/libri/saggistica
-/path/to/libri/ebooks" | parallel 'python ibs_fast_metadata_search.py {} --json-only 2>&1 | tee {}/pipeline.log'
-```
-
-### ⏰ Automazione con cron
-
-```bash
-# Ogni domenica alle 3:00, processa una directory
-# Aggiungi a crontab -e:
-# 0 3 * * 0 cd /home/utente/epubsearch_ibs && python ibs_fast_metadata_search.py /home/utente/libri/ --force >> /home/utente/libri/cron.log 2>&1
-```
-
-**`run_pipeline.sh`:**
-```bash
-#!/bin/bash
-# Processa 3 directory in sequenza, con log separati
-DIRS=("/home/libri/raccolte/" "/home/libri/novita/" "/home/libri/saggi/")
-DATE=$(date +%F)
-
-for dir in "${DIRS[@]}"; do
-    if [ -d "$dir" ]; then
-        echo "[$(date)] Processing $dir"
-        python /home/utente/epubsearch_ibs/ibs_fast_metadata_search.py "$dir" --force \
-            >> "$dir/pipeline_$DATE.log" 2>&1
-        echo "[$(date)] Done: $dir"
-    fi
-done
-```
-
-### 🔍 Grep avanzato nel log
-
-```bash
-# Libri non trovati (rosso nel log = stringa FAIL)
-grep '\[FAIL\]' pipeline.log
-
-# Libri embeddati con successo
-grep 'EMBEDDED' pipeline.log
-
-# Tempo totale di esecuzione
-grep 'Total time' pipeline.log
-
-# Statistiche finali
-grep -A5 'PIPELINE COMPLETED' pipeline.log
-```
-
-### 📋 Creare un report personalizzato con pipe
-
-```bash
-# Genera un sommario — log in console + JSON salvato + report testuale
-python ibs_fast_metadata_search.py ./libri/ --json-only 2>&1 | tee pipeline.log
-
-# Processa il JSON generato per estrarre solo i dati che ti servono
-jq -r '.books[] | select(.status == "success") | "\(.metadata.isbn) - \(.author): \(.title)"' \
-    metadata_batch.json > report.txt
-```
-
-### 🩺 Verifica rapida dell'embedding
-
-```bash
-# Controlla che gli EPUB embeddati abbiano i metadati corretti
-for epub in ./embedded/*.epub; do
-    title=$(unzip -p "$epub" META-INF/container.xml | grep -oP 'full-path="\K[^"]+' | xargs -I{} sh -c 'unzip -p "$1" "$2"' _ "$epub" {} | grep -oP '<dc:title>[^<]+' | head -1 | sed 's/<dc:title>//')
-    isbn=$(unzip -p "$epub" META-INF/container.xml | grep -oP 'full-path="\K[^"]+' | xargs -I{} sh -c 'unzip -p "$1" "$2"' _ "$epub" {} | grep -oP '<dc:identifier>[^<]+' | head -1 | sed 's/<dc:identifier>//')
-    echo "$epub → $title | $isbn"
-done
-```
-
-### 🗑️ Cleanup rapido
-
-```bash
-# Rimuovi tutti i file generati dalla pipeline, mantieni solo gli EPUB
-rm -rf origins/ embedded/ notfound/
-rm -f metadata_batch.json pipeline_report.html metadata_report.html pipeline.log
-```
-
----
-
-## 🔧 Note Tecniche
-
-### Regex Escaping
-
-Una versione precedente di `ibs_fast_metadata_search.py` conteneva regex con doppio escaping (`\\s`, `\\d`, `\\\\[`). Questo è stato corretto — il file attuale usa il corretto escaping singolo.
-
-Vedere `MEMO_regex_escaping.md` per i dettagli.
-
-### Nome File Atteso
-
-Il parser assume il formato standard:
-
-```
-Autore - Titolo.epub
-```
-
-Casi particolari gestiti automaticamente:
-- **Alias/username**: rimossi (`/@[a-z]+/`)
-- **Virgole**: normalizzate
-- **Sottotitoli**: ignorati (viene preso solo l'ultimo ` - `)
-
----
-
-## 📊 Test Real-World
-
-Test eseguito su **49 EPUB** italiani con `ibs_fast_metadata_search.py`:
-
-| Metrica | IBS.it Fast |
-|---|---|
-| Tempo totale scraping | **54.5 sec** |
-| Tempo per libro | **~1.1 sec** |
-| Success rate | **100%** (49/49) |
-| Con ISBN | **49/49** |
-| Con editore | **49/49** |
-| Con descrizione | **49/49** |
-| Con pagine | **46/49** |
-
----
-
-## 🔧 Troubleshooting
-
-### `ModuleNotFoundError: No module named 'requests'`
-
-Manca la libreria `requests`. Installala:
-```bash
-pip install requests
-```
-Se usi Python 3 in un ambiente virtuale, attivalo prima.
-
----
-
-### `ModuleNotFoundError: No module named 'bs4'`
-
-Manca `beautifulsoup4`:
-```bash
-pip install beautifulsoup4
-```
-
----
-
-### `Error: playwright library not found` (solo `ibs_metadata_search.py`)
-
-Playwright è necessario solo per lo script legacy. Se usi `ibs_fast_metadata_search.py` puoi ignorare questo warning.
-Per installarlo:
-```bash
-pip install playwright
-playwright install chromium
-```
-
----
-
-### `'NoneType' object has no attribute 'get_text'` o simili AttributeError
-
-IBS.it potrebbe aver modificato il markup HTML delle pagine dettaglio. Lo script fallisce perché non trova i selector CSS attesi.
-
-**Soluzione:**
-- Usa `--json-only` e controlla `metadata_batch.json` per vedere se la struttura Algolia è ancora valida
-- Se l'API Algolia è cambiata, la versione Playwright (`ibs_metadata_search.py`) potrebbe funzionare come fallback
-
----
-
-### `404 Client Error` o `Timeout` durante lo scraping
-
-Il sito potrebbe essere momentaneamente giù o la connessione di rete potrebbe essere instabile.
-
-**Soluzioni:**
-- Riprova dopo qualche minuto
-- Aumenta il delay (`--delay 5.0`) per evitare rate limiting
-- Per IBS Fast: l'API Algolia potrebbe richiedere nuove credenziali. Controlla la console del browser su `ibs.it` cercando richieste a `algolia.net`
-
----
-
-### `SyntaxError: bad escape \u at position 0`
-
-Errore di escaping nelle regex. Se compare, una stringa come `\u001b` è stata scritta con doppi backslash invece di uno singolo.
-
-**Rimedio rapido:**
-```bash
-# Sostituisci \\u001b con \x1b nei file problematici
-sed -i "s/\\\\u001b/\\x1b/g" ibs_fast_metadata_search.py
-```
-Vedi anche `MEMO_regex_escaping.md` per la documentazione completa del bug.
-
----
-
-### Nessun risultato trovato per un libro che sicuramente esiste
-
-Cause possibili:
-- **Formato nome file errato**: deve essere `Autore - Titolo.epub`. Sottotitoli dopo un secondo ` - ` vengono ignorati.
-- **Caratteri speciali**: virgolette, accenti, caratteri non ASCII possono confondere la ricerca. Prova a rinominare il file con caratteri base.
-- **Libro non presente su IBS.it**: non tutti i libri italiani sono indicizzati su IBS.
-- **Query troppo specifica**: lo script cerca con `autore + titolo`. Se il titolo contiene sottotitoli lunghi, potrebbero non corrispondere.
-
----
-
-### `JSON saved: metadata_batch.json (0.0 KB)`
-
-Il file JSON è stato creato vuoto — significa che nessun libro è stato processato.
-
-**Controlla:**
-- La directory contiene file `.epub`? (case-sensitive: l'estensione deve essere `.epub`, non `.EPUB` o altro)
-- Lo script ha i permessi di lettura/scrittura sulla directory?
-
----
-
-### `FileNotFoundError: [Errno 2] No such file or directory: '...'`
-
-Il percorso della directory passato come argomento non esiste o è sbagliato.
-
-**Soluzione:** usa il percorso assoluto o verifica il percorso relativo:
-```bash
-# Usa percorso assoluto
-python ibs_fast_metadata_search.py /home/utente/Scaricati/libri/
-
-# O verifica che il percorso relativo sia corretto
-ls ./libri/
-```
-
----
-
-### Embedding fallito con `'no container.xml'` o `'no content.opf'`
-
-Il file EPUB non è valido o è danneggiato. Lo script non riesce ad accedere alla sua struttura interna.
-
-**Verifica manuale:**
-```bash
-# Controlla se l'EPUB è un valido archivio ZIP
-unzip -l libro.epub | head -20
-# Deve contenere META-INF/container.xml e un file .opf
-```
-
----
-
-### `PermissionError: [Errno 13] Permission denied`
-
-Lo script non ha permessi di scrittura sulla directory o sui file EPUB.
-
-**Soluzione:**
-```bash
-# Dai permessi di scrittura
-chmod -R u+w /home/utente/Scaricati/libri/
-```
+| `ibs_fast_metadata_search.py` | Prima generazione: scraping IBS + embedding di metadati multipli. **Contiene bug noti** (sovrascrittura title/creator dal filename, flattening `get_text(strip=True)`, rezip che rompe la convenzione `mimetype`) — non usarlo come base |
+| `ibs_metadata_search.py` | Variante Playwright (lenta, ~300 MB di Chromium) |
+| `gui_ibs_fast_metadata_search.py` | GUI customtkinter per il tool legacy |
 
 ---
 
