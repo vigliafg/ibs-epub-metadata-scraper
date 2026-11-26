@@ -553,7 +553,7 @@ def search_amazon(session, query, ean=None, author='', title='',
     for asin in asins[:max_products]:
         time.sleep(1)
         try:
-            resp = session.get('%s/dp/%s' % (AMAZON_URL, asin),
+            resp = session.get('%s/dp/%s' % (base_url, asin),
                                timeout=TIMEOUT)
             resp.raise_for_status()
             ph = resp.text
@@ -566,7 +566,8 @@ def search_amazon(session, query, ean=None, author='', title='',
         atitle = _html.unescape(m.group(1)).strip() if m else ''
         if not atitle:
             continue
-        # autore dalla byline: "di <Nome> (Autore)"
+        # autore dalla byline: "di <Nome> (Autore)" (.it) oppure
+        # "by <Name> (Author)" (.com/.co.uk)
         aauthor = ''
         bi = ph.find('id="bylineInfo"')
         if bi >= 0:
@@ -574,7 +575,7 @@ def search_amazon(session, query, ean=None, author='', title='',
                 r'<[^>]+>', '\n', ph[bi:bi + 2500]))
             blines = [l.strip() for l in btxt.splitlines() if l.strip()]
             for j, l in enumerate(blines):
-                if l.lower() == 'di' and j + 1 < len(blines):
+                if l.lower() in ('di', 'by') and j + 1 < len(blines):
                     aauthor = _html.unescape(re.sub(
                         r'\s*\([^)]*\)\s*$', '', blines[j + 1])).strip()
                     break
@@ -593,7 +594,9 @@ def search_amazon(session, query, ean=None, author='', title='',
             out = []
             for p in paras:
                 if re.search(r'recensioni clienti|visualizza tutti|'
-                             r'dettagli prodotto|feedback|aggiungi al carrello',
+                             r'dettagli prodotto|feedback|aggiungi al carrello|'
+                             r'customer reviews|see all|product details|'
+                             r'add to cart|report an issue',
                              p, re.I):
                     break
                 if len(p) > 40:
@@ -709,44 +712,70 @@ def find_book_smart(session, epub_path, opf_path, cand_author, cand_title,
         if re.fullmatch(r'\d{9}[\dXx]|\d{13}', stem):
             raw = stem.upper()
             ean = raw if len(raw) == 13 else isbn10_to_ean(raw)
+    # 1-4) match IBS: se la pagina esiste ma senza descrizione (tipico
+    #    dei "libro inglese") non ferma la catena: si prosegue verso i
+    #    fallback e il match IBS resta come fallback per la rinomina.
+    fallback = None
+
+    def _ibs_try(m):
+        # recupera subito la descrizione IBS: valida solo se presente,
+        # altrimenti il match va tenuto come fallback di rinomina
+        nonlocal fallback
+        if not m:
+            return None
+        m['description'] = get_description(m['url'], session) or ''
+        if m['description']:
+            return m
+        fallback = fallback or m
+        return None
+
     if ean:
-        m = find_book_by_ean(session, ean)
+        m = _ibs_try(find_book_by_ean(session, ean))
         if m:
             return m
     if cand_author and cand_title:
-        m = find_book(session, cand_author, cand_title)
+        m = _ibs_try(find_book(session, cand_author, cand_title))
         if m:
             return m
-        m = find_book(session, cand_title, cand_author)
+        m = _ibs_try(find_book(session, cand_title, cand_author))
         if m:
             return m
     # 4) deep scan: prime pagine dell'EPUB (lettura non distruttiva)
-    m = deep_scan_match(session, epub_path, opf_path)
+    m = _ibs_try(deep_scan_match(session, epub_path, opf_path))
     if m:
         return m
-    # 5) Google Books: fallback per libri stranieri non a catalogo IBS
+    # 5) Google Books: fallback per libri stranieri non a catalogo IBS.
+    #    Un match senza descrizione non ferma la catena: viene tenuto
+    #    come fallback per la rinomina e si prosegue verso Amazon.
+    fallback = None
     if ean:
         m = search_google_books(session, 'isbn:%s' % ean, ean=ean)
         if m:
-            return m
+            if m.get('description'):
+                return m
+            fallback = fallback or m
     if cand_author and cand_title:
         m = search_google_books(
             session, '%s %s' % (cand_author, cand_title),
             author=cand_author, title=cand_title, min_score=30)
         if m:
-            return m
-    # 6) Open Library: seconda rete senza chiavi API
+            if m.get('description'):
+                return m
+            fallback = fallback or m
+    # 6) Open Library: seconda rete senza chiavi API (stesso criterio)
     m = search_openlibrary(session, ean=ean, author=cand_author,
                            title=cand_title, min_score=30)
     if m:
-        return m
+        if m.get('description'):
+            return m
+        fallback = fallback or m
     # 7) Amazon: ultima rete (scraping, uso contenuto); .it -> .com -> .co.uk
     m = search_amazon_multi(session, '%s %s' % (cand_author, cand_title),
                             ean=ean, author=cand_author, title=cand_title,
                             min_score=30)
     if m:
         return m
-    return None
+    return fallback
 
 
 # ---------------------------------------------------------------------------
@@ -877,7 +906,14 @@ def rewrite_epub(epub_path, opf_path, new_description, new_tag=None):
         entries = [(i, z.read(i.filename)) for i in z.infolist()]
 
     desc_html = escape(new_description)
-    if re.search(r'<dc:description[^>]*>', data):
+    if re.search(r'<dc:description[^>]*/>', data):
+        # descrizione self-closing (<dc:description/>): la regex di
+        # sostituzione sotto non troverebbe </dc:description> e re.sub
+        # restituirebbe la stringa invariata riportando successo
+        new_data = re.sub(r'<dc:description[^>]*/>',
+                          '<dc:description>%s</dc:description>' % desc_html,
+                          data, count=1)
+    elif re.search(r'<dc:description[^>]*>', data):
         new_data = re.sub(
             r'(<dc:description[^>]*>).*?(</dc:description>)',
             lambda m: m.group(1) + desc_html + m.group(2),
@@ -1165,11 +1201,10 @@ def process_epub(epub_path, session, backup_dir, force, dry_run,
                 res['matched_url'] = match['url']
                 res['isbn'] = match['isbn']
                 res['match_source'] = match.get('source', 'ibs')
-                if match.get('source') != 'ibs':
-                    res['description'] = match.get('description') or ''
-                else:
-                    res['description'] = get_description(match['url'],
-                                                        session)
+                res['description'] = (match.get('description') or '') if (
+                    match.get('source') != 'ibs') else (
+                    match.get('description')
+                    or get_description(match['url'], session))
             else:
                 res['description'] = ''
                 res['detail'] = 'nessun match (IBS.it / Google Books)'
@@ -1243,9 +1278,8 @@ def process_epub(epub_path, session, backup_dir, force, dry_run,
         res['detail'] = 'nessun match affidabile (IBS.it / Google Books)'
         return res
 
-    if match.get('source') != 'ibs':
-        description = match.get('description') or ''
-    else:
+    description = match.get('description') or ''
+    if not description and match.get('source') == 'ibs':
         description = get_description(match['url'], session)
     if not description:
         res['status'] = 'not_found'
