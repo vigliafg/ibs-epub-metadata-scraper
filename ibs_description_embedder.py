@@ -940,6 +940,11 @@ def rewrite_epub(epub_path, opf_path, new_description, new_tag=None):
             return False, 'tag </metadata> non trovato nell\'OPF (subject)'
 
     tmp = epub_path + '.tmp'
+    # EPUB OCF: 'mimetype' deve essere la PRIMA entry, non compressa.
+    # Alcuni EPUB di partenza hanno una directory (es. META-INF/, ops/)
+    # prima di mimetype: preservare l'ordine originale li renderebbe
+    # non conformi. Sort stabile: mimetype primo, resto in ordine originale.
+    entries.sort(key=lambda e: 0 if e[0].filename == 'mimetype' else 1)
     with zipfile.ZipFile(tmp, 'w') as zout:
         for info, content in entries:
             zi = zipfile.ZipInfo(info.filename, date_time=info.date_time)
