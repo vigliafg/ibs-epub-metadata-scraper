@@ -928,9 +928,13 @@ def rewrite_epub(epub_path, opf_path, new_description, new_tag=None):
             return False, 'tag </metadata> non trovato nell\'OPF'
 
     if new_tag:
-        # sistema monotag: rimuove TUTTI i dc:subject esistenti
-        new_data = re.sub(r'<dc:subject[^>]*>.*?</dc:subject>\s*', '',
-                          new_data, flags=re.S)
+        # sistema monotag: rimuove TUTTI i dc:subject esistenti.
+        # Il contenuto paired e' testo senza '<': usare [^<]* e NON .*?
+        # (con re.S, un <dc:subject /> self-closing seguito da un
+        # </dc:subject> successivo ingoiava tutto il testo in mezzo,
+        # compresa la descrizione appena inserita -- bug 2026-11-26).
+        new_data = re.sub(r'<dc:subject[^>]*>[^<]*</dc:subject>\s*', '',
+                          new_data)
         new_data = re.sub(r'<dc:subject[^>]*/>\s*', '', new_data)
         subj = '<dc:subject>%s</dc:subject>' % escape(new_tag)
         new_data, n = re.subn(r'(</metadata\s*>)',
